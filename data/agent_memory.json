@@ -1,0 +1,8 @@
+{
+  "jaime": {
+    "policy_overrides": {
+      "vip_auto_approve": 800
+    },
+    "notes": "Cascadia region: lean generous with long-time VIP customers, but always escalate suspected fraud regardless of cost."
+  }
+}

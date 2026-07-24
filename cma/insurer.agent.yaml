@@ -1,0 +1,121 @@
+name: insurance-insurer
+model: claude-opus-4-8
+system: |-
+  You are an AI assistant speaking directly with an insurance
+  policyholder. You can only (1) help them file a new claim — gather policy, loss type(s),
+  a description, and an estimated cost, then create it (new claims are routed to intake
+  adjuster "jaime"), and (2) answer questions about the status of THIS policyholder's
+  own claims. Never approve, deny, escalate, or reveal other policyholders' claims. Be warm
+  and clear, and confirm details before filing.
+tools:
+- type: custom
+  name: get_incident_details
+  description: Look up a single incident by its id.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to fetch (e.g. "case-3001").
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: list_incidents_for_insurer
+  description: List the incidents (claims) belonging to a given insurer (policyholder).  Use this to answer a policyholder's questions about the status of their own claims.
+  input_schema:
+    type: object
+    properties:
+      insurer_id:
+        type: string
+        description: The insurer's id whose incidents to list (e.g. "ins-1001").
+    additionalProperties: false
+    required:
+    - insurer_id
+- type: custom
+  name: find_insurer
+  description: Look up a single insurer (policyholder) by id.
+  input_schema:
+    type: object
+    properties:
+      insurer_id:
+        type: string
+        description: The insurer's id / lookup key (e.g. "ins-1001").
+    additionalProperties: false
+    required:
+    - insurer_id
+- type: custom
+  name: find_policy
+  description: Look up a single policy by id.
+  input_schema:
+    type: object
+    properties:
+      policy_id:
+        type: string
+        description: The policy's id / lookup key (e.g. "pol-2001").
+    additionalProperties: false
+    required:
+    - policy_id
+- type: custom
+  name: create_incident
+  description: Create a new incident (claim) and persist it.  A fresh unique id is generated, ``submitted_date`` is set to now (UTC), ``status`` defaults to ``ReportStatus.NEW`` and ``resolution`` to ``Resolution.INPROGRESS``. The new incident is saved before being returned.  The referenced ids are stored as-is and not validated here; use ``find_adjuster``/``find_insurer``/``find_policy`` first if you need to confirm they exist.
+  input_schema:
+    type: object
+    properties:
+      adjuster_id:
+        type: string
+        description: Id of the adjuster who will handle the claim (e.g. "jaime").
+      type:
+        type: integer
+        description: 'One or more ``ReportType`` flags describing the loss. Combine with ``|``, e.g. ``ReportType.STOLEN_CAR | ReportType.CAR_ACCIDENT``. Integer bitmask; combine values by adding. Members: STOLEN_CAR=1, STOLEN_OTHER=2, CAR_ACCIDENT=4.'
+      details:
+        type: string
+        description: Free-text description of the incident.
+      insurer_id:
+        type: string
+        description: Id of the insurer/policyholder (e.g. "ins-1001").
+      policy_id:
+        type: string
+        description: Id of the policy the claim is filed against (e.g. "pol-2001").
+      estimate_cost:
+        type: integer
+        description: Estimated cost of the incident in whole dollars. Used by ``process_incident``. Defaults to 0.
+    additionalProperties: false
+    required:
+    - adjuster_id
+    - type
+    - details
+    - insurer_id
+    - policy_id
+- type: custom
+  name: append_insurer_history
+  description: Append a date-stamped note to an insurer's history log and save it.
+  input_schema:
+    type: object
+    properties:
+      insurer_id:
+        type: string
+        description: The insurer's id (e.g. "ins-1001").
+      note:
+        type: string
+        description: The interaction to record (without a date; it is added for you).
+    additionalProperties: false
+    required:
+    - insurer_id
+    - note
+- type: custom
+  name: append_insurer_preferences
+  description: Append a preference line to an insurer (policyholder) and save it.  Unlike history, preferences are *not* date-stamped — they describe standing wishes. The note is added on its own line.
+  input_schema:
+    type: object
+    properties:
+      insurer_id:
+        type: string
+        description: The insurer's id (e.g. "ins-1001").
+      note:
+        type: string
+        description: The preference to add, e.g. "Their name is Joseph, but goes by Joe".
+    additionalProperties: false
+    required:
+    - insurer_id
+    - note

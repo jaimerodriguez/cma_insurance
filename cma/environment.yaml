@@ -1,0 +1,5 @@
+name: insurance-mock-env
+config:
+  type: cloud
+  networking:
+    type: unrestricted

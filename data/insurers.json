@@ -1,0 +1,41 @@
+{
+  "ins-1001": {
+    "id": "ins-1001",
+    "full_name": "Maria Gonzalez",
+    "address": "1420 Pine St, Seattle WA 98101",
+    "phone_number": "206-555-0110",
+    "preferences": "Prefers to be contacted in Spanish when possible.",
+    "history": "7/5/2026 - called to confirm claim received, reassured.",
+    "is_VIP": true
+  },
+  "ins-1002": {
+    "id": "ins-1002",
+    "full_name": "Joseph Okafor",
+    "address": "88 Marine Dr, Portland OR 97035",
+    "phone_number": "503-555-0120",
+    "preferences": "Their name is Joseph, but goes by Joe.",
+    "history": "7/7/2026 - frustrated with lack of progress on burglary claim.",
+    "is_VIP": false
+  },
+  "ins-1003": {
+    "id": "ins-1003",
+    "full_name": "Emily Nakamura",
+    "address": "300 Aspen Way, Boise ID 83702",
+    "phone_number": "208-555-0130",
+    "is_VIP": true
+  },
+  "ins-1004": {
+    "id": "ins-1004",
+    "full_name": "Liam O'Brien",
+    "address": "55 Birch Ave, Spokane WA 99201",
+    "phone_number": "509-555-0140",
+    "is_VIP": false
+  },
+  "ins-1005": {
+    "id": "ins-1005",
+    "full_name": "Priya Patel",
+    "address": "720 Cedar Blvd, Bend OR 97701",
+    "phone_number": "541-555-0150",
+    "is_VIP": true
+  }
+}

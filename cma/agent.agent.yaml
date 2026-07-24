@@ -1,0 +1,63 @@
+name: insurance-agent
+model: claude-opus-4-8
+system: |-
+  You are the automated maintenance agent for the claims system. Your job
+  is to close out claims that have been resolved (approved or denied) for a while: call
+  close_stale_resolved to find and close claims resolved more than 30 minutes ago, then
+  report how many you closed.
+tools:
+- type: custom
+  name: get_incident_details
+  description: Look up a single incident by its id.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to fetch (e.g. "case-3001").
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: list_incidents
+  description: List the incidents assigned to a given adjuster.  Use this to discover incidents when you only know the adjuster (rather than a specific case id).
+  input_schema:
+    type: object
+    properties:
+      adjuster_id:
+        type: string
+        description: The adjuster's id whose incidents to list (e.g. "jaime").
+    additionalProperties: false
+    required:
+    - adjuster_id
+- type: custom
+  name: update_status
+  description: Set an incident's lifecycle status and log the change.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to update (e.g. "case-3001").
+      status:
+        type: string
+        enum:
+        - new
+        - open
+        - notified
+        - closed
+        description: The new ``ReportStatus`` (or its string value, e.g. "closed").
+    additionalProperties: false
+    required:
+    - incident_id
+    - status
+- type: custom
+  name: close_stale_resolved
+  description: Auto-close incidents that have been resolved (approved/denied) a while.  Scans all incidents and sets ``status`` to ``ReportStatus.CLOSED`` for any whose ``resolution`` is APPROVED or DENIED, whose ``resolved_date`` is more than ``minutes`` minutes ago, and which are not already CLOSED. Intended to be run on a schedule (e.g. once a day) or on demand.
+  input_schema:
+    type: object
+    properties:
+      minutes:
+        type: integer
+        description: Age threshold in minutes since ``resolved_date``. Defaults to 30.
+    additionalProperties: false

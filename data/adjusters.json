@@ -1,0 +1,36 @@
+{
+  "jaime": {
+    "user_id": "jaime",
+    "location": "Seattle WA",
+    "phone_number": "206-555-0142",
+    "timezone": "America/Los_Angeles",
+    "full_name": "Jaime Rodriguez",
+    "preferences": "Do not share my phone number; tell them I will contact them.",
+    "history": "6/30/2026 - onboarded to the Cascadia region team."
+  },
+  "sam": {
+    "user_id": "sam",
+    "location": "Portland OR",
+    "phone_number": "503-555-0173",
+    "timezone": "America/Los_Angeles",
+    "full_name": "Sam Chenaur",
+    "preferences": "Prefers email over phone. Reachable 9am-3pm only.",
+    "history": "7/1/2026 - covering caseload for a colleague on leave.",
+    "authorization_level": "medium"
+  },
+  "jane": {
+    "user_id": "jane",
+    "location": "Boise ID",
+    "phone_number": "208-555-0196",
+    "timezone": "America/Boise",
+    "full_name": "Jane Austin",
+    "preferences": "Fine to share direct line with policyholders.",
+    "history": "5/15/2026 - recognized for fast claim turnaround.",
+    "authorization_level": "high"
+  },
+
+  "unassigned" : { 
+     "user_id": "unassigned", 
+     "preferences": "Unassigned incidents can't be discussed with insurers."
+  }
+}

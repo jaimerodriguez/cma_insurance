@@ -1,0 +1,5 @@
+# Development dependencies (runtime + tooling).
+# PyYAML is only needed to run the CMA YAML generator (gen_cma_yaml.py).
+# Install with:  pip install -r requirements-dev.txt
+-r requirements.txt
+PyYAML>=6.0.3

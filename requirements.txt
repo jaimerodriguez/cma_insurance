@@ -1,0 +1,4 @@
+# Runtime dependencies for the insurance claims agent mock.
+# Install with:  pip install -r requirements.txt
+anthropic>=0.118.0
+python-dotenv>=1.2.2

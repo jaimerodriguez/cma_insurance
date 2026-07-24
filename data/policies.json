@@ -1,0 +1,42 @@
+{
+  "pol-2001": {
+    "id": "pol-2001",
+    "policy_type": "auto",
+    "insurer_id": "ins-1001",
+    "effective_date": "2025-01-01",
+    "expiration_date": "2026-01-01",
+    "premium": 1200.00
+  },
+  "pol-2002": {
+    "id": "pol-2002",
+    "policy_type": "home",
+    "insurer_id": "ins-1002",
+    "effective_date": "2024-06-15",
+    "expiration_date": "2025-06-15",
+    "premium": 950.50
+  },
+  "pol-2003": {
+    "id": "pol-2003",
+    "policy_type": "auto",
+    "insurer_id": "ins-1003",
+    "effective_date": "2025-03-01",
+    "expiration_date": "2026-03-01",
+    "premium": 1100.00
+  },
+  "pol-2004": {
+    "id": "pol-2004",
+    "policy_type": "other",
+    "insurer_id": "ins-1004",
+    "effective_date": "2025-02-10",
+    "expiration_date": "2026-02-10",
+    "premium": 300.00
+  },
+  "pol-2005": {
+    "id": "pol-2005",
+    "policy_type": "home",
+    "insurer_id": "ins-1005",
+    "effective_date": "2024-11-20",
+    "expiration_date": "2025-11-20",
+    "premium": 1350.75
+  }
+}

@@ -1,0 +1,365 @@
+name: insurance-adjuster
+model: claude-opus-4-8
+system: |-
+  You are an AI assistant acting on behalf of an insurance adjuster.
+  You manage that adjuster's claims: list/inspect incidents and escalations; approve or
+  deny (individually or in bulk when asked); escalate; update status; notify the adjuster
+  and policyholder; and log history/notes. Only take adjuster actions.
+
+  You have a persistent memory store mounted under /mnt/memory/. It holds your standing
+  auto-approval policy overrides and working notes. ALWAYS read it before acting (use the
+  read/glob tools), and write updates back (write/edit) when you learn a lasting rule.
+
+  The baseline auto-approval policy (DynamicPolicies defaults) is:
+  {
+    "auto_approve": 300,
+    "vip_auto_approve": 500,
+    "upset_auto_approve_home": 1500,
+    "vip_auto_approve_home": 5000,
+    "agent_override_autoapprove": false,
+    "agent_override_autoapprove_reason": null
+  }
+  Merge any overrides from your memory onto this baseline and pass the resulting object as
+  the `policies` argument to approve_incident / escalate_incident. Whether a policyholder is
+  "upset" is your judgement — read the incident and the insurer's history and set
+  insurer_upset accordingly. Confirm before denying a claim or approving many at once.
+tools:
+- type: agent_toolset_20260401
+- type: custom
+  name: get_incident_details
+  description: Look up a single incident by its id.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to fetch (e.g. "case-3001").
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: list_incidents
+  description: List the incidents assigned to a given adjuster.  Use this to discover incidents when you only know the adjuster (rather than a specific case id).
+  input_schema:
+    type: object
+    properties:
+      adjuster_id:
+        type: string
+        description: The adjuster's id whose incidents to list (e.g. "jaime").
+    additionalProperties: false
+    required:
+    - adjuster_id
+- type: custom
+  name: get_adjuster_details
+  description: 'Resolve the adjuster assigned to a given incident.  Follows the chain: incident id -> the incident''s ``adjuster_id`` -> the adjuster record.'
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to resolve (e.g. "case-3001").
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: find_adjuster
+  description: Look up a single adjuster by their first-name id.
+  input_schema:
+    type: object
+    properties:
+      adjuster_id:
+        type: string
+        description: The adjuster's id / lookup key (e.g. "jaime").
+    additionalProperties: false
+    required:
+    - adjuster_id
+- type: custom
+  name: find_insurer
+  description: Look up a single insurer (policyholder) by id.
+  input_schema:
+    type: object
+    properties:
+      insurer_id:
+        type: string
+        description: The insurer's id / lookup key (e.g. "ins-1001").
+    additionalProperties: false
+    required:
+    - insurer_id
+- type: custom
+  name: find_policy
+  description: Look up a single policy by id.
+  input_schema:
+    type: object
+    properties:
+      policy_id:
+        type: string
+        description: The policy's id / lookup key (e.g. "pol-2001").
+    additionalProperties: false
+    required:
+    - policy_id
+- type: custom
+  name: list_escalations
+  description: List the escalations awaiting a given adjuster's decision.
+  input_schema:
+    type: object
+    properties:
+      adjuster_id:
+        type: string
+        description: The adjuster's id (e.g. "jaime").
+    additionalProperties: false
+    required:
+    - adjuster_id
+- type: custom
+  name: process_incident
+  description: 'Triage an incident for approval using the given dynamic policies.  The decision is delegated to ``policies.should_auto_approve`` (see ``DynamicPolicies``), which considers the incident cost, whether the policyholder is a VIP (read from the insurer record), whether the policy is a HOME policy, whether the policyholder is upset, and any agent override.  If it auto-approves, the resolution is set to APPROVED via ``update_resolution`` (adjuster "system") with the reason recorded. Otherwise the incident is escalated to its adjuster (resolution stays ``INPROGRESS``) and the escalation reason is stored on the incident.  Whether the insurer is upset is a judgement call, so it is supplied by the caller rather than computed here: the agent should read the incident and the insurer''s history and decide. It defaults to False when unknown.'
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to triage (e.g. "case-3001").
+      policies:
+        type: object
+        properties:
+          auto_approve:
+            type: integer
+            description: Baseline auto-approve ceiling in dollars.
+          vip_auto_approve:
+            type: integer
+            description: Ceiling for VIP policyholders.
+          upset_auto_approve_home:
+            type: integer
+            description: Ceiling for upset policyholders on HOME claims.
+          vip_auto_approve_home:
+            type: integer
+            description: Ceiling for VIP policyholders on HOME claims.
+          agent_override_autoapprove:
+            type: boolean
+            description: When True, force auto-approval.
+          agent_override_autoapprove_reason:
+            type: string
+            description: Why the agent forced approval.
+        additionalProperties: false
+        description: The ``DynamicPolicies`` (ceilings + agent override) to apply, as a ``DynamicPolicies``, a plain dict of its fields, or None. Defaults to a fresh ``DynamicPolicies()`` when omitted.
+      insurer_upset:
+        type: boolean
+        description: True if the agent judges the policyholder to be upset. Defaults to False.
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: escalate_incident
+  description: Escalate an incident to its adjuster for an approve/deny decision.  Adds an entry to the escalation queue keyed by the incident id and assigned to the incident's adjuster, and logs the escalation on the incident's history. The adjuster later resolves it via ``update_resolution`` (which clears it from the queue).
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to escalate (e.g. "case-3004").
+      policies:
+        type: object
+        properties:
+          auto_approve:
+            type: integer
+            description: Baseline auto-approve ceiling in dollars.
+          vip_auto_approve:
+            type: integer
+            description: Ceiling for VIP policyholders.
+          upset_auto_approve_home:
+            type: integer
+            description: Ceiling for upset policyholders on HOME claims.
+          vip_auto_approve_home:
+            type: integer
+            description: Ceiling for VIP policyholders on HOME claims.
+          agent_override_autoapprove:
+            type: boolean
+            description: When True, force auto-approval.
+          agent_override_autoapprove_reason:
+            type: string
+            description: Why the agent forced approval.
+        additionalProperties: false
+        description: The ``DynamicPolicies`` in effect (a ``DynamicPolicies``, a plain dict of its fields, or None). Used only to annotate the history note with the baseline auto-approve ceiling. Defaults to a fresh ``DynamicPolicies()`` when omitted.
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: update_resolution
+  description: Set an incident's resolution and record who decided it (and why).  Appends a date-stamped line to the incident's history noting the new resolution, the deciding adjuster, and the reason if given. When ``reason`` is provided it is also stored on the incident's ``resolution_reason``. If the resolution is APPROVED or DENIED, any pending escalation for this incident is removed from the queue (this is how an adjuster clears an escalation they were asked to decide).
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to update (e.g. "case-3001").
+      adjuster:
+        type: string
+        description: Id of the adjuster making the decision (use "system" for automated approvals).
+      resolution:
+        type: string
+        enum:
+        - approved
+        - denied
+        - inprogress
+        - disputed
+        description: The new ``Resolution`` (or its string value, e.g. "approved").
+      reason:
+        type: string
+        description: Optional free-text explanation, stored on the incident and noted in its history.
+    additionalProperties: false
+    required:
+    - incident_id
+    - adjuster
+    - resolution
+- type: custom
+  name: update_status
+  description: Set an incident's lifecycle status and log the change.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to update (e.g. "case-3001").
+      status:
+        type: string
+        enum:
+        - new
+        - open
+        - notified
+        - closed
+        description: The new ``ReportStatus`` (or its string value, e.g. "closed").
+    additionalProperties: false
+    required:
+    - incident_id
+    - status
+- type: custom
+  name: notify_adjuster
+  description: Notify the incident's adjuster that its resolution status changed.  Appends a date-stamped note to the adjuster's history and returns a human-readable confirmation.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id (e.g. "case-3001").
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: notify_insurer
+  description: Notify the incident's insurer (policyholder) that its resolution changed.  Appends a date-stamped note to the insurer's history and returns a human-readable confirmation.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id (e.g. "case-3001").
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: notify_update
+  description: Notify both the adjuster and the insurer of an incident update.  Calls ``notify_adjuster`` and ``notify_insurer``, then sets the incident's status to ``ReportStatus.NOTIFIED``.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id (e.g. "case-3001").
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: append_incident_history
+  description: Append a date-stamped note to an incident's history log and save it.  The note is prefixed with today's date and added on a new line, e.g. "left voicemail for policyholder" becomes "7/23/2026 - left voicemail for policyholder".
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to update (e.g. "case-3001").
+      note:
+        type: string
+        description: The activity to record (without a date; it is added for you).
+    additionalProperties: false
+    required:
+    - incident_id
+    - note
+- type: custom
+  name: append_adjuster_history
+  description: Append a date-stamped note to an adjuster's history log and save it.
+  input_schema:
+    type: object
+    properties:
+      adjuster_id:
+        type: string
+        description: The adjuster's id (e.g. "jaime").
+      note:
+        type: string
+        description: The interaction to record (without a date; it is added for you).
+    additionalProperties: false
+    required:
+    - adjuster_id
+    - note
+- type: custom
+  name: append_insurer_history
+  description: Append a date-stamped note to an insurer's history log and save it.
+  input_schema:
+    type: object
+    properties:
+      insurer_id:
+        type: string
+        description: The insurer's id (e.g. "ins-1001").
+      note:
+        type: string
+        description: The interaction to record (without a date; it is added for you).
+    additionalProperties: false
+    required:
+    - insurer_id
+    - note
+- type: custom
+  name: set_incident_history
+  description: Overwrite an incident's entire history field (pass None to clear).  Replaces whatever is there; nothing is date-stamped. Use ``append_incident_history`` to add a dated entry instead.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to update (e.g. "case-3001").
+      value:
+        type: string
+        description: The new full history text, or ``None`` to clear it.
+    additionalProperties: false
+    required:
+    - incident_id
+    - value
+- type: custom
+  name: append_adjuster_preferences
+  description: Append a preference line to an adjuster and save it.  Unlike history, preferences are *not* date-stamped — they describe standing wishes. The note is added on its own line.
+  input_schema:
+    type: object
+    properties:
+      adjuster_id:
+        type: string
+        description: The adjuster's id (e.g. "jaime").
+      note:
+        type: string
+        description: The preference to add, e.g. "Prefers email over phone".
+    additionalProperties: false
+    required:
+    - adjuster_id
+    - note
+- type: custom
+  name: append_insurer_preferences
+  description: Append a preference line to an insurer (policyholder) and save it.  Unlike history, preferences are *not* date-stamped — they describe standing wishes. The note is added on its own line.
+  input_schema:
+    type: object
+    properties:
+      insurer_id:
+        type: string
+        description: The insurer's id (e.g. "ins-1001").
+      note:
+        type: string
+        description: The preference to add, e.g. "Their name is Joseph, but goes by Joe".
+    additionalProperties: false
+    required:
+    - insurer_id
+    - note
