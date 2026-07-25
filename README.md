@@ -5,9 +5,10 @@ mock insurance-claims domain. It models adjusters, policyholders, policies, and
 incident reports (claims), exposes the domain as a set of **role-restricted agent
 tools**, and provides two interchangeable front-ends:
 
-- **`repl.py`** — a local agent chat + deterministic test bed. The tool loop runs on
-  your machine; great for fast iteration and for exercising logic with (or without) an
-  API key.
+- **`repl.py`** — a local agent chat + deterministic test bed. Runs the LLM either
+  through the **Claude Agent SDK** (default; the `claude` CLI's subscription auth, no
+  API key) or the **Anthropic API** (`--use-key`). Also has deterministic commands that
+  need no LLM at all. Great for fast iteration.
 - **`cma.py`** — the hosted **Managed Agents (CMA)** version. Anthropic runs the agent
   loop in a per-session container; adjuster memory lives in real Managed Agents memory
   stores.
@@ -29,6 +30,7 @@ local and hosted paths stay in lockstep.
 - [Setup](#setup)
 - [Using the local REPL (`repl.py`)](#using-the-local-repl-replpy)
 - [Using Managed Agents (`cma.py`)](#using-managed-agents-cmapy)
+- [Observability (`agent_obs`)](#observability-agent_obs)
 - [Project layout](#project-layout)
 - [Development notes](#development-notes)
 
@@ -98,10 +100,43 @@ Incident --adjuster_id--> Adjuster
 Incident --insurer_id--> Insurer   (secondary/redundant direct link)
 ```
 
-Key enums: `ReportType` is an `IntFlag` bitmask (`STOLEN_CAR`/`STOLEN_OTHER`/
-`CAR_ACCIDENT`, combinable with `|`); `Resolution` (`APPROVED`/`DENIED`/`INPROGRESS`/
-`DISPUTED`) and `ReportStatus` (`NEW`/`OPEN`/`NOTIFIED`/`CLOSED`) track a claim's
-lifecycle.
+Key enums: `ReportType` is an `IntFlag` bitmask — `STOLEN_CAR` (1),
+`STOLEN_OTHER` (2), `CAR_ACCIDENT` (4), `HOME_THEFT` (8), `HOME_ACCIDENT` (16),
+`HOME_NATURAL_DISASTER` (32) — combinable with `|`, plus a `HOME` composite alias
+covering the three dwelling flags. `Resolution` (`APPROVED`/`DENIED`/`INPROGRESS`/
+`DISPUTED`/`MANAGEMENT_OVERRIDE`) and `ReportStatus` (`NEW`/`OPEN`/`NOTIFIED`/
+`CLOSED`) track a claim's lifecycle.
+
+`AuthorizationLevel` is `LOW`/`MEDIUM`/`HIGH` plus `OVERRIDE_NEEDED` — not an
+authority anyone holds, but the marker for a claim beyond every band.
+`required_authorization(cost)` returns it instead of `None` above
+`authorization_high`, and `Adjuster` rejects it as a value for
+`authorization_level`. Compare levels with `.rank`; test holdability with
+`.is_assignable`.
+
+`Resolution.is_terminal` is the single definition of "this claim's review is
+over": `APPROVED`, `DENIED` and `MANAGEMENT_OVERRIDE` are terminal — they stamp
+`resolved_date`, clear any pending escalation, and make the claim eligible for the
+auto-close pass. `INPROGRESS` and `DISPUTED` are not, and neither is the
+`ESCALATED_TO_MANAGEMENT` *status* — a claim with management is still live.
+
+**Escalation to management.** An adjuster can hand a claim up for any reason with
+`escalate_to_management(incident_id, reason)`; the agent does it automatically
+when a claim's cost exceeds every authorization band. Either way the status
+becomes `ESCALATED_TO_MANAGEMENT`, any pending adjuster escalation is withdrawn,
+and the resolution stays `INPROGRESS` until management calls `update_resolution`
+with `MANAGEMENT_OVERRIDE`. `process_incident` returns such a claim untouched, so
+a scheduled triage pass is idempotent and never decides over management's head.
+
+```
+cost <= authorization_high   -> route to an adjuster at that level
+cost >  authorization_high   -> OVERRIDE_NEEDED -> ESCALATED_TO_MANAGEMENT
+                                -> MANAGEMENT_OVERRIDE (terminal) -> auto-close
+```
+
+A claim counts as a **home** claim for auto-approval ceilings when its policy is
+`PolicyType.HOME` *or* its `incident_type` carries any `ReportType.HOME` flag, so
+a dwelling loss filed against a non-HOME policy still gets the home ceilings.
 
 ---
 
@@ -185,27 +220,42 @@ pip install -r requirements.txt
 #   For the CMA YAML generator (gen_cma_yaml.py), install the dev extras instead:
 #   pip install -r requirements-dev.txt
 
-# 2. Provide Anthropic credentials
+# 2a. Default mode — no API key. Install and log into the Claude Code CLI:
+#     https://code.claude.com  (then `claude` and sign in with your subscription)
+#     repl.py's default backend drives this CLI via claude-agent-sdk.
+
+# 2b. --use-key mode — provide an Anthropic API key instead:
 cp .env.example .env
-#   then edit .env and set ANTHROPIC_API_KEY=sk-ant-...
-#   (or export ANTHROPIC_API_KEY in your shell, or use `ant auth login`)
+#     then edit .env and set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 `.env` and `.key` are git-ignored — never commit credentials.
 
-> Only the LLM-driven paths need a key. The deterministic maintenance commands
-> (`/agent`, `/agent-run`) run without one.
+> The deterministic maintenance commands (`/agent`, `/agent-run`) need neither a key
+> nor the CLI — they run pure Python with no LLM.
 
 ---
 
 ## Using the local REPL (`repl.py`)
 
 ```bash
-python3 repl.py
+python3 repl.py            # LLM via the Claude Agent SDK (claude CLI subscription auth)
+python3 repl.py --use-key  # LLM via the Anthropic API (ANTHROPIC_API_KEY from .env)
 ```
 
-Assume a persona, then chat. The agent acts through the role-restricted tools; the tool
-loop runs locally.
+The LLM personas work in **both** modes — `--use-key` only selects the backend:
+
+| Mode | Backend | Auth | Needs |
+|---|---|---|---|
+| default | **Claude Agent SDK** (drives the `claude` CLI, which runs the agent loop) | CLI subscription — `.env` is not read and `ANTHROPIC_API_KEY` is unset for the process | `claude-agent-sdk` + a logged-in `claude` CLI |
+| `--use-key` | Anthropic API directly (local tool loop) | `ANTHROPIC_API_KEY` loaded from `.env` | `anthropic` + `python-dotenv` |
+
+Either way the role's allowed tools and system prompt come from `roles.py`, and the
+deterministic commands (`/agent`, `/agent-run`) work with no LLM at all.
+
+Assume a persona, then chat. In default mode the SDK exposes our role-restricted tools
+as in-process MCP tools (`mcp__insurance__<fn>`) and gates them with
+`permission_mode="dontAsk"` so the model can call exactly those and nothing else.
 
 | Command | LLM? | Description |
 |---|---|---|
@@ -276,10 +326,131 @@ are interchangeable.
 
 ---
 
+## Observability (`agent_obs`)
+
+`agent_obs/` is a self-contained tracing package wired into **both** front-ends. It
+records four independent layers, each append-only JSONL, each switchable on its own:
+
+| Layer | File | Answers |
+|---|---|---|
+| `events` | `var/traces/<run>.events.jsonl` | what happened, in order |
+| `spans` | `var/traces/<run>.otel.jsonl` | OpenTelemetry `session → turn → tool`, with durations |
+| `wire` | `var/traces/<run>.wire.jsonl` | the real HTTP payloads: system prompt, messages, tool schemas, `cache_control` |
+| `usage` | `var/ledger.jsonl` | per-turn tokens, cache hits, cost — comparable across backends |
+
+Files are keyed on a **run id** we mint (`repl-20260724-151727-38fd57`);
+`var/runs.jsonl` maps runs to provider session ids. All output is gitignored.
+
+```bash
+python3 repl.py                     # events + spans + usage + tool tracing (default)
+python3 repl.py --wire              # + capture the real API payloads
+python3 repl.py --obs-redact dev    # keep (truncated) content instead of hashing it
+python3 repl.py --wire --obs-wire-tools skeleton \
+       --obs-wire-tools-keep 'mcp__insurance__*'   # drop the CLI's ambient tool schemas
+python3 repl.py --no-obs            # trace nothing
+python3 cma.py --wire               # same layers for the Managed Agents front-end
+```
+
+In either REPL: `/obs` for status and file paths, `/obs tail [n]` for the event log,
+`/obs stats [backend|role|model|kind]` for ledger totals.
+
+**Coverage.** All three LLM paths are instrumented: the Agent SDK backend (hooks +
+message-stream observation + wire), the `--use-key` Anthropic API backend (one
+ledger row per `messages.create`, `extra.loop_turn` numbering the tool loop), and
+Managed Agents (session-event tracing, usage from `session` events). Tool calls are
+traced for all three at once, because they all execute through `repl._dispatch`,
+which carries the `@agent_obs.traced_dispatch` decorator.
+
+**Redaction** (`--obs-redact`, `OBS_REDACT`). Credentials are dropped in every mode,
+including `none`.
+
+| Mode | Behaviour |
+|---|---|
+| `flow` *(default)* | Each string written **in full the first time it appears**; every later appearance becomes `{"_t": "seen", "preview": <first 20 chars>, "chars": N, "sha": …}`. Since every request resends the whole conversation, each request shows what is *new* with the history collapsed to a followable skeleton — and the `sha` locates the full text earlier in the same file. |
+| `strict` | No content at all: every string becomes `{chars, sha}`. Structure, tool names, message counts, and `cache_control` placement survive. Use when a trace might leave this machine. |
+| `dev` | Every string kept, truncated to `max_field_chars`. No repeat collapsing, so long conversations get large. |
+| `none` | Passthrough. Synthetic data only. |
+
+Tune with `OBS_PREVIEW_CHARS` (default 20), `OBS_MAX_FIELD_CHARS` (default 4000 —
+sized so a typical tool description or system prompt fits whole on first sight), and
+`OBS_MIN_COLLAPSE_CHARS` (default 200 — strings below this are never collapsed, so
+tool/function/model/session names stay verbatim however often they repeat).
+Diagnostic strings (`error`, `proxy_error`, `line`) are truncated rather than hashed
+in every mode, so traces stay debuggable.
+
+`flow` also collapses repeated **subtrees**, not just repeated strings: a dict or
+list above `OBS_MIN_NODE_CHARS` (default 500) that has been written before becomes
+`{"_t": "seen_node", "kind", "chars", "sha"}`. This is what handles a resent JSON
+Schema — every string inside one is a field name below the string floor, so no
+per-string rule can collapse it. Disable with `--no-collapse-structures` /
+`OBS_COLLAPSE_STRUCTURES=0`.
+
+**Tool-definition shaping** (`--obs-wire-tools`, `OBS_WIRE_TOOLS`) — wire layer only,
+and lossy, so it is opt-in and a shaped row is stamped `"_shaped"`.
+
+On the Agent SDK path the `claude` CLI builds the tool list and ships every native
+tool plus every MCP server configured on the machine, not just the ones this app
+registers. Measured on a real run here: **118 definitions, 268 KB per request, of
+which 8 tools (4.4 KB) were ours** — and third-party servers interpolate account
+state into their descriptions (that capture contained real Slack user ids and
+workspace URLs). So this is a privacy control as much as a size one.
+
+| Mode | Each tool becomes |
+|---|---|
+| `full` *(default)* | verbatim — the capture stays faithful |
+| `skeleton` | `{name, params, required, desc_chars, sha}` (~55 B) |
+| `names` | `{name, sha}` |
+
+`--obs-wire-tools-keep` takes comma-separated `fnmatch` patterns kept verbatim —
+normally one pattern for the server this app registers, so a tool added later keeps
+its schema without anyone updating a list:
+
+```bash
+python3 repl.py --wire --obs-wire-tools skeleton --obs-wire-tools-keep 'mcp__insurance__*'
+```
+
+The per-tool `sha` covers the original definition, so a shaped trace can still prove
+the tool list was byte-identical between turns. Measured over the 6-request capture
+above: 1,059 KB verbatim → 570 KB with `flow` alone → **263 KB** once subtrees
+collapse → **59 KB** with `skeleton` + `keep`.
+
+Reading a `flow`-mode wire log, four requests into a session:
+
+```
+--- request 3:  291865 B | tools=130 | messages=4
+    tools[0]   : 'Agent' desc=seen: 'Launch a new agent t' (1574 ch, sha 6db6259110b2)
+    msg[0] user      : seen: '<system-reminder>\nAs' (851 ch, sha cc2d6a10af4c)
+    msg[1] system    : seen: 'Available agent type' (6720 ch, sha 9a589d8308bf)
+    msg[2] assistant : FULL TEXT (26 ch)          <- new this request
+    msg[3] user      : list[1]                    <- new this request
+```
+
+**Nothing here changes agent behaviour.** All 10 SDK hooks are registered and every
+callback returns `{}`; authorization stays in `roles.py`. A failed capture proxy
+sets `wire_error` and the run continues.
+
+Design rationale, the defects this fixes relative to the code it was distilled
+from, and the decision log: [`docs/observability-design.md`](docs/observability-design.md).
+Env-var configuration (`OBS_*`) is documented on `ObsConfig.from_env`.
+
+---
+
 ## Project layout
 
 ```
 .
+├── agent_obs/              # observability package (events, spans, wire, usage)
+│   ├── facade.py           #   Observability — the object a front-end constructs
+│   ├── config.py           #   ObsConfig + OBS_* env vars
+│   ├── events.py           #   semantic event log
+│   ├── spans.py            #   OTel session → turn → tool (opentelemetry optional)
+│   ├── wire.py             #   local capture proxy (requests + responses)
+│   ├── usage.py            #   TurnRecord/ledger + one adapter per backend
+│   ├── redact.py           #   strict/dev/none, applied at the sink boundary
+│   ├── sinks.py            #   JsonlSink: lock, size cap, rotation
+│   ├── tooltrace.py        #   @traced_dispatch — backend-independent tool tracing
+│   ├── sdk.py              #   10 tracing-only hooks + message-stream observation
+│   └── logbridge.py        #   stdlib logging -> event log
 ├── data_entities.py        # enums, dataclasses, (de)serialization
 ├── storage.py              # data/ paths + load/save/update layer
 ├── tools.py                # agent-callable tools + AGENT_TOOLS registry
@@ -293,6 +464,13 @@ are interchangeable.
 ├── manual_setup.py         # standalone Managed Agents quickstart/scratch example
 ├── cma/                    # generated environment/agent YAML + setup.sh + seeds
 ├── data/                   # JSON persistence (see below)
+├── docs/
+│   └── observability-design.md   # tracing design, defect analysis, decision log
+├── tests/                  # pytest;  .venv/bin/python -m pytest tests/ -q
+│   ├── conftest.py         # `world` fixture — storage redirected at a scratch data/
+│   ├── test_agent_obs.py   # agent_obs unit tests
+│   └── test_triage.py      # triage path: ceilings, routing, escalation, auto-close
+├── var/                    # trace output + usage ledger (gitignored, created on run)
 ├── CHANGELOG.md            # detailed change history
 └── README.md
 ```

@@ -1,10 +1,6 @@
 name: insurance-agent
 model: claude-opus-4-8
-system: |-
-  You are the automated maintenance agent for the claims system. Your job
-  is to close out claims that have been resolved (approved or denied) for a while: call
-  close_stale_resolved to find and close claims resolved more than 30 minutes ago, then
-  report how many you closed.
+system: "You are an agent processing insurance claims.   \nYour job is to triage unassigned claims. You can deny claims when they do not have enough information, or they are not in the right category.   \nYou can automatically approve claims that are within your authorization budgets.  You have budget variance based on whether the customer is upset, or whether they are a VIP. \nYou can find out if a customer (or Insurer) is upset by looking at the claim's history. \nFor claims that are over your authorization limits, you can assign them to adjusters with higher levels. Check the adjuster's authorization level before you assign a claim to them.  \n\nA different part of your job is to close out claims that have been resolved (approved or denied) for a while: call\nclose_stale_resolved to find and close claims resolved more than 30 minutes ago\n\n\nAs you work, keep track of the claims you processed and report the outcome or action taken for each.  \nWhen you close a claim where the insurer was upset, look at the insurer's notes and update them with the resolution for that claim so we know if they will be upset next time. \nInsurers who were upset and have the claim denied might remain upset with us. \n\n"
 tools:
 - type: custom
   name: get_incident_details
@@ -31,6 +27,115 @@ tools:
     required:
     - adjuster_id
 - type: custom
+  name: get_adjuster_details
+  description: 'Resolve the adjuster assigned to a given incident.  Follows the chain: incident id -> the incident''s ``adjuster_id`` -> the adjuster record.'
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to resolve (e.g. "case-3001").
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: find_adjuster
+  description: Look up a single adjuster by their first-name id.
+  input_schema:
+    type: object
+    properties:
+      adjuster_id:
+        type: string
+        description: The adjuster's id / lookup key (e.g. "jaime").
+    additionalProperties: false
+    required:
+    - adjuster_id
+- type: custom
+  name: list_adjusters
+  description: List every adjuster on the roster.  Useful for routing an incident to an adjuster with a suitable ``authorization_level`` (see ``assign_incident``).
+  input_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+- type: custom
+  name: retrieve_policies
+  description: List every policy held by a given insurer (policyholder).  Use this to see which policies a policyholder holds (e.g. before filing a claim against one of them).
+  input_schema:
+    type: object
+    properties:
+      insurer_id:
+        type: string
+        description: The insurer's id whose policies to list (e.g. "ins-1001").
+    additionalProperties: false
+    required:
+    - insurer_id
+- type: custom
+  name: process_incident
+  description: 'Triage an incident for approval using the given dynamic policies.  The decision is delegated to ``policies.should_auto_approve`` (see ``DynamicPolicies``), which considers the incident cost, whether the policyholder is a VIP (read from the insurer record), whether this is a home claim, whether the policyholder is upset, and any agent override. A claim counts as *home* when its policy is ``PolicyType.HOME`` or its ``incident_type`` carries any ``ReportType.HOME`` flag.  If it auto-approves, the resolution is set to APPROVED via ``update_resolution`` (adjuster "system") with the reason recorded.  An incident already at ``ESCALATED_TO_MANAGEMENT`` is returned untouched: management owns the decision, and the pass is run repeatedly.  Otherwise, in order:  1. If the cost exceeds every authorization band (``required_authorization`` returns ``OVERRIDE_NEEDED``), the incident is sent to management via ``escalate_to_management`` — status ``ESCALATED_TO_MANAGEMENT``, resolution still ``INPROGRESS``. No adjuster could decide it, so this happens regardless of ``can_assign`` or whether the incident is already assigned. 2. Else if it is unassigned, it is routed to the lowest-authorization adjuster who qualifies — or left untouched when ``can_assign`` is False or nobody qualifies. 3. Else it is escalated to its own adjuster (resolution stays ``INPROGRESS``) and the escalation reason is stored on the incident.  Whether the insurer is upset is a judgement call, so it is supplied by the caller rather than computed here: the agent should read the incident and the insurer''s history and decide. It defaults to False when unknown.'
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to triage (e.g. "case-3001").
+      policies:
+        type: object
+        properties:
+          auto_approve:
+            type: integer
+            description: Baseline auto-approve ceiling in dollars.
+          vip_auto_approve:
+            type: integer
+            description: Ceiling for VIP policyholders.
+          upset_auto_approve_home:
+            type: integer
+            description: Ceiling for upset policyholders on HOME claims.
+          vip_auto_approve_home:
+            type: integer
+            description: Ceiling for VIP policyholders on HOME claims.
+          agent_override_autoapprove:
+            type: boolean
+            description: When True, force auto-approval.
+          agent_override_autoapprove_reason:
+            type: string
+            description: Why the agent forced approval.
+          can_assign:
+            type: boolean
+            description: When True, an unassigned incident that isn't auto-approved may be routed to a suitable adjuster instead of being left alone.
+          authorization_low:
+            type: integer
+            description: Max claim cost a LOW-authorization adjuster handles.
+          authorization_medium:
+            type: integer
+            description: Max claim cost a MEDIUM-authorization adjuster handles.
+          authorization_high:
+            type: integer
+            description: Max claim cost a HIGH-authorization adjuster handles.
+        additionalProperties: false
+        description: The ``DynamicPolicies`` (ceilings + agent override) to apply, as a ``DynamicPolicies``, a plain dict of its fields, or None. Defaults to a fresh ``DynamicPolicies()`` when omitted.
+      insurer_upset:
+        type: boolean
+        description: True if the agent judges the policyholder to be upset. Defaults to False.
+    additionalProperties: false
+    required:
+    - incident_id
+- type: custom
+  name: escalate_to_management
+  description: 'Hand an incident up to management, for any reason.  Sets ``status`` to ``ReportStatus.ESCALATED_TO_MANAGEMENT``, stores ``reason`` on the incident''s ``resolution_reason``, and logs a date-stamped line to its history. Any pending adjuster escalation for the incident is withdrawn from the queue, because the decision is no longer the adjuster''s to make.  The claim stays live: ``resolution`` is left at ``INPROGRESS`` until management decides, typically by calling ``update_resolution`` with ``Resolution.MANAGEMENT_OVERRIDE``. This is deliberately *not* a resolution of its own — an escalation is a routing step, and treating it as an outcome would stamp ``resolved_date`` and let the auto-close pass close a claim nobody has decided.  An adjuster may call this for any reason (a conflict of interest, a policyholder threatening litigation, an ambiguous exclusion). The agent calls it automatically when a claim''s cost exceeds every authorization band — see ``AuthorizationLevel.OVERRIDE_NEEDED`` and ``process_incident``.'
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to escalate (e.g. "case-3001").
+      reason:
+        type: string
+        description: Why this needs management. Free text, stored on the incident and noted in its history.
+    additionalProperties: false
+    required:
+    - incident_id
+    - reason
+- type: custom
   name: update_status
   description: Set an incident's lifecycle status and log the change.
   input_schema:
@@ -45,6 +150,7 @@ tools:
         - new
         - open
         - notified
+        - escalated_to_management
         - closed
         description: The new ``ReportStatus`` (or its string value, e.g. "closed").
     additionalProperties: false
@@ -52,8 +158,24 @@ tools:
     - incident_id
     - status
 - type: custom
+  name: assign_incident
+  description: Assign an incident to an adjuster and log the reassignment.  Sets the incident's ``adjuster_id`` and appends a date-stamped note to its history recording the new assignee. The adjuster must exist in ``adjusters.json``; use ``find_adjuster`` first if unsure.
+  input_schema:
+    type: object
+    properties:
+      incident_id:
+        type: string
+        description: The incident/case id to assign (e.g. "case-3001").
+      adjuster_id:
+        type: string
+        description: Id of the adjuster to assign it to (e.g. "jaime").
+    additionalProperties: false
+    required:
+    - incident_id
+    - adjuster_id
+- type: custom
   name: close_stale_resolved
-  description: Auto-close incidents that have been resolved (approved/denied) a while.  Scans all incidents and sets ``status`` to ``ReportStatus.CLOSED`` for any whose ``resolution`` is APPROVED or DENIED, whose ``resolved_date`` is more than ``minutes`` minutes ago, and which are not already CLOSED. Intended to be run on a schedule (e.g. once a day) or on demand.
+  description: Auto-close incidents that have been resolved a while.  Scans all incidents and sets ``status`` to ``ReportStatus.CLOSED`` for any whose ``resolution`` is terminal (see ``Resolution.is_terminal`` — APPROVED, DENIED or MANAGEMENT_OVERRIDE), whose ``resolved_date`` is more than ``minutes`` minutes ago, and which are not already CLOSED. Intended to be run on a schedule (e.g. once a day) or on demand.
   input_schema:
     type: object
     properties:

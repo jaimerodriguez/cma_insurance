@@ -3,3 +3,4 @@
 # Install with:  pip install -r requirements-dev.txt
 -r requirements.txt
 PyYAML>=6.0.3
+pytest>=8.0            # tests/ — agent_obs and triage-path unit tests

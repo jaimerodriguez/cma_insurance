@@ -1,4 +1,17 @@
 # Runtime dependencies for the insurance claims agent mock.
+#
+# Default mode (no --use-key) drives the LLM through the Claude Agent SDK, which
+# runs the `claude` CLI under the hood — the CLI must be installed and logged in
+# (subscription auth; no API key needed).
+# --use-key mode talks to the Anthropic API directly (needs anthropic + python-dotenv
+# and an ANTHROPIC_API_KEY in .env).
+#
 # Install with:  pip install -r requirements.txt
 anthropic>=0.118.0
 python-dotenv>=1.2.2
+claude-agent-sdk>=0.2.126
+
+# Observability (agent_obs). Only the OTel span layer needs this; without it
+# agent_obs degrades to a no-op tracer and the event log, wire capture, and usage
+# ledger all still work.
+opentelemetry-sdk>=1.44.0

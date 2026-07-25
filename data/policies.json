@@ -38,5 +38,85 @@
     "effective_date": "2024-11-20",
     "expiration_date": "2025-11-20",
     "premium": 1350.75
+  },
+  "pol-2006": {
+    "id": "pol-2006",
+    "policy_type": "auto",
+    "insurer_id": "ins-1006",
+    "effective_date": "2026-01-01",
+    "expiration_date": "2027-01-01",
+    "premium": 1425.00
+  },
+  "pol-2007": {
+    "id": "pol-2007",
+    "policy_type": "home",
+    "insurer_id": "ins-1007",
+    "effective_date": "2026-03-01",
+    "expiration_date": "2027-03-01",
+    "premium": 1680.50
+  },
+  "pol-2008": {
+    "id": "pol-2008",
+    "policy_type": "auto",
+    "insurer_id": "ins-1008",
+    "effective_date": "2025-01-01",
+    "expiration_date": "2025-12-31",
+    "premium": 1195.00
+  },
+  "pol-2009": {
+    "id": "pol-2009",
+    "policy_type": "home",
+    "insurer_id": "ins-1009",
+    "effective_date": "2026-06-01",
+    "expiration_date": "2027-06-01",
+    "premium": 1320.00
+  },
+  "pol-2010": {
+    "id": "pol-2010",
+    "policy_type": "other",
+    "insurer_id": "ins-1010",
+    "effective_date": "2026-02-15",
+    "expiration_date": "2027-02-15",
+    "premium": 485.75
+  },
+  "pol-2011": {
+    "id": "pol-2011",
+    "policy_type": "auto",
+    "insurer_id": "ins-1011",
+    "effective_date": "2026-08-01",
+    "expiration_date": "2027-08-01",
+    "premium": 1510.00
+  },
+  "pol-2012": {
+    "id": "pol-2012",
+    "policy_type": "home",
+    "insurer_id": "ins-1012",
+    "effective_date": "2025-05-01",
+    "expiration_date": "2026-05-01",
+    "premium": 1095.25
+  },
+  "pol-2013": {
+    "id": "pol-2013",
+    "policy_type": "auto",
+    "insurer_id": "ins-1013",
+    "effective_date": "2026-01-15",
+    "expiration_date": "2027-01-15",
+    "premium": 1860.00
+  },
+  "pol-2014": {
+    "id": "pol-2014",
+    "policy_type": "home",
+    "insurer_id": "ins-1006",
+    "effective_date": "2026-04-01",
+    "expiration_date": "2027-04-01",
+    "premium": 1275.00
+  },
+  "pol-2015": {
+    "id": "pol-2015",
+    "policy_type": "auto",
+    "insurer_id": "ins-1007",
+    "effective_date": "2026-05-01",
+    "expiration_date": "2027-05-01",
+    "premium": 1335.50
   }
 }

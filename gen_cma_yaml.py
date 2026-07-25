@@ -59,7 +59,9 @@ def _environment_body() -> dict:
 def _agent_body(role: Role) -> dict:
     return {
         "name": f"insurance-{role.value}",
-        "model": cma.MODEL,
+        # Per-role, matching what `cma.setup()` sends at agent-create time
+        # (cma.py:209) — a single `cma.MODEL` no longer exists.
+        "model": cma.MODEL_BY_ROLE[role],
         "system": cma._agent_system(role),
         "tools": cma.agent_tools_for_role(role),
     }

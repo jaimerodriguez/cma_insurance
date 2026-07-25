@@ -1,8 +1,15 @@
 # Secrets — never commit
 .env
 .key
+.keys 
+
 
 # Python
 .venv/
 __pycache__/
 *.pyc
+
+# Observability output: event logs, OTel spans, wire captures, usage ledger.
+# Strict redaction keeps claim text out of these, but they still describe real
+# runs (sizes, timings, session ids), so they stay local.
+var/

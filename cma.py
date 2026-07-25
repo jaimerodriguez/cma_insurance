@@ -29,15 +29,22 @@ roles, and schemas are shared with the local REPL, so the two stay in lockstep.
 Run:  python3 cma.py
 """
 
+import argparse
 import dataclasses
 import json
+import time
+from typing import Any
 
+import agent_obs
 import agent_schemas
 import roles
 import storage
 import tools
 from data_entities import DynamicPolicies
-from repl import _dispatch, _jsonify  # reuse the role-restricted dispatcher + serializer
+# Reuse the role-restricted dispatcher + serializer. `_dispatch` is already
+# decorated with agent_obs.traced_dispatch there, so every custom-tool call this
+# front-end services is traced with no extra wiring here.
+from repl import _dispatch, _jsonify
 from roles import Role
 
 # Per-role model: cheaper/faster models for the narrower roles, the most capable
@@ -113,16 +120,41 @@ the `policies` argument to approve_incident / escalate_incident. Whether a polic
 insurer_upset accordingly. Confirm before denying a claim or approving many at once."""
 
 _INSURER_SYSTEM = """You are an AI assistant speaking directly with an insurance
-policyholder. You can only (1) help them file a new claim — gather policy, loss type(s),
+policyholder. 
+You can 
+(1) help them file a new claim — gather policy, loss type(s),
 a description, and an estimated cost, then create it (new claims are routed to intake
-adjuster "{intake}"), and (2) answer questions about the status of THIS policyholder's
-own claims. Never approve, deny, escalate, or reveal other policyholders' claims. Be warm
-and clear, and confirm details before filing."""
+adjuster "{intake}") 
+(2) answer questions about the status of THIS policyholder's own claims. 
+Never approve, deny, escalate, or reveal other policyholders' claims. 
+(3) if the insurer asks for contact info for the assigned adjuster, you can share it only if the adjuster's preference allows it.  If not allowed, don't share it. If claim is not assigned, let them know.  
+Don't volunteer the adjuster's details unless the insurer asks.  
 
-_AGENT_SYSTEM = """You are the automated maintenance agent for the claims system. Your job
-is to close out claims that have been resolved (approved or denied) for a while: call
-close_stale_resolved to find and close claims resolved more than 30 minutes ago, then
-report how many you closed."""
+Be warmand clear, and confirm details before filing. For all incidents or conversations, try to detect any emotional aspects of the claim being filed. Was the insurer frustrated? was he friendly. 
+Note these emotional observations in the incident's history, or the insurer's history.  These details are useful for later decisions and escalations.  
+
+"""
+
+_AGENT_SYSTEM = """You are an agent processing insurance claims.   
+- Your job is to triage unassigned claims and claims the adjusters could not resolve (status == ESCALATED_TO_MANAGEMENT or authorization_level == OVERRIDE_NEEDED). 
+For unassigned claims. 
+- You can deny any claims when they do not have enough information, or they are not in the right category.   
+- You can automatically approve claims that are within your authorization budgets and withint the policies' coverage.  You have budget variance based on whether the customer is upset, or whether they are a VIP. Do not auto approve claims that are outside of policies. Escalate those to management instead (status == ESCALATED_TO_MANAGEMENT ). Add the reason it was escalated. 
+- You must find out if a customer (or Insurer) is upset by looking at the claim's history. Consider this for your decisions.  
+- For claims that are over your authorization limits and have not been escalated, you can assign them to adjusters with higher levels. Check the adjuster's authorization level before you assign a claim to them.  
+- If a claim is above all adjuster's authorization levels, then set its status to ESCALATED_TO_MANAGEMENT and set its' authorization_level to OVERRIDE_NEEDED.  
+
+For escalated claims: 
+- As an agent, you will only resolve them in conversations (chat mode), when the approval code ("UNICORN") is provided. You can be order to resolve a claim (approve or deny)  but only if the approval code is provided in that session. 
+
+A different part of your job is to close out claims that have been resolved (approved or denied) for a while: call
+close_stale_resolved to find and close claims resolved more than 30 minutes ago. 
+
+As you work, keep track of the claims you processed and report the outcome or action taken for each.  
+When you close a claim where the insurer was upset, look at the insurer's notes and update them with the resolution for that claim so we know if they will be upset next time. 
+Insurers who were upset and have the claim denied might remain upset with us. 
+
+"""
 
 
 def _agent_system(role: Role) -> str:
@@ -252,52 +284,83 @@ class CmaSession:
         return session.id
 
     def send(self, user_text: str) -> str:
-        """Send a user turn, service custom-tool calls, and return the agent's reply."""
+        """Send a user turn, service custom-tool calls, and return the agent's reply.
+
+        Traced as one ``turn`` span per user message covering every stream leg. The
+        session events are the only usage source on this backend — there is no
+        ``ResultMessage`` — so ``session.usage``-shaped events are read defensively
+        and a run with none simply records zeros (the wire log still has the truth).
+        """
+        obs = agent_obs.current()
         to_send: list[dict] | None = [
             {"type": "user.message", "content": [{"type": "text", "text": user_text}]}
         ]
         text_parts: list[str] = []
         terminated = False
+        started = time.monotonic()
+        usage: Any = None
+        legs = 0
 
-        while True:
-            # Stream-first: open the stream, then send inside it so no early event is missed.
-            with self.client.beta.sessions.events.stream(session_id=self.session_id) as stream:
-                if to_send is not None:
-                    self.client.beta.sessions.events.send(session_id=self.session_id, events=to_send)
-                    to_send = None
-                tool_calls = []
-                for event in stream:
-                    etype = getattr(event, "type", None)
-                    if etype == "agent.message":
-                        for block in getattr(event, "content", []) or []:
-                            if getattr(block, "type", None) == "text":
-                                text_parts.append(block.text)
-                    elif etype == "agent.custom_tool_use":
-                        tool_calls.append(event)
-                    elif etype == "session.status_terminated":
-                        terminated = True
-                        break
-                    elif etype == "session.status_idle":
-                        # Idle waiting on us (a custom tool) -> keep going; otherwise done.
-                        stop = getattr(event, "stop_reason", None)
-                        if getattr(stop, "type", None) != "requires_action":
-                            terminated = False
+        with obs.turn("chat", backend="cma", role=self.role.value,
+                      identity=self.identity, session_id=self.session_id) as span:
+            obs.note_session(self.session_id, backend="cma")
+            while True:
+                legs += 1
+                # Stream-first: open the stream, then send inside it so no early event is missed.
+                with self.client.beta.sessions.events.stream(session_id=self.session_id) as stream:
+                    if to_send is not None:
+                        self.client.beta.sessions.events.send(session_id=self.session_id, events=to_send)
+                        to_send = None
+                    tool_calls = []
+                    for event in stream:
+                        etype = getattr(event, "type", None)
+                        # Every event type at debug level: this is the only window
+                        # into a hosted loop we do not run ourselves.
+                        obs.events.debug("cma.event", event_type=etype)
+                        if getattr(event, "usage", None) is not None:
+                            usage = event.usage
+                        if etype == "agent.message":
+                            for block in getattr(event, "content", []) or []:
+                                if getattr(block, "type", None) == "text":
+                                    text_parts.append(block.text)
+                        elif etype == "agent.custom_tool_use":
+                            obs.events.info("cma.custom_tool_use", tool=event.name,
+                                            tool_use_id=event.id, input=event.input)
+                            tool_calls.append(event)
+                        elif etype == "session.status_terminated":
+                            obs.events.warn("cma.terminated", session_id=self.session_id)
+                            terminated = True
                             break
+                        elif etype == "session.status_idle":
+                            # Idle waiting on us (a custom tool) -> keep going; otherwise done.
+                            stop = getattr(event, "stop_reason", None)
+                            if getattr(stop, "type", None) != "requires_action":
+                                terminated = False
+                                break
 
-            if terminated or not tool_calls:
-                break
-            to_send = [
-                {
-                    "type": "user.custom_tool_result",
-                    "custom_tool_use_id": call.id,
-                    "content": [{"type": "text", "text": _dispatch(self.table, call.name, call.input)}],
-                }
-                for call in tool_calls
-            ]
+                if terminated or not tool_calls:
+                    break
+                to_send = [
+                    {
+                        "type": "user.custom_tool_result",
+                        "custom_tool_use_id": call.id,
+                        "content": [{"type": "text", "text": _dispatch(self.table, call.name, call.input)}],
+                    }
+                    for call in tool_calls
+                ]
+
+            obs.record_turn(span, obs.usage.from_cma_usage(
+                usage, session_id=self.session_id,
+                wall_ms=int((time.monotonic() - started) * 1000),
+                role=self.role.value, identity=self.identity,
+                model=MODEL_BY_ROLE[self.role], kind="chat",
+                is_error=terminated,
+                extra={"stream_legs": legs}))
 
         return "".join(text_parts).strip()
 
 
+@agent_obs.trace_callable("cma.maintenance", kind="maintenance")
 def run_agent_maintenance(client, config: dict) -> str:
     """Run the maintenance persona as a CMA session and return its report."""
     session = CmaSession(client, config, Role.AGENT, "system")
@@ -315,78 +378,150 @@ _HELP = """Commands:
   /insurer <id>      start a policyholder session (by insurer id), e.g. /insurer ins-1001
   /agent             run the maintenance agent now (close stale resolved claims)
   /whoami            show the current role
+  /obs               observability status (add `tail [n]` or `stats [by]`)
   /help              show this help
   /quit              exit
 Anything else is sent to the current session."""
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="cma.py",
+        description="Managed Agents insurance REPL (hosted agent loop).",
+    )
+    obs_group = parser.add_argument_group("observability")
+    obs_group.add_argument(
+        "--wire", action="store_true", default=False,
+        help="Capture the real API payloads through a local proxy. Covers the "
+             "Managed Agents session endpoints (/v1/beta/...) as well as /v1/messages.",
+    )
+    obs_group.add_argument(
+        "--obs-redact", choices=("flow", "strict", "dev", "none"), default=None,
+        help="Redaction level for what is written to disk (default: strict).",
+    )
+    obs_group.add_argument(
+        "--obs-wire-tools", choices=("full", "skeleton", "names"), default=None,
+        help="How much of each tool definition the wire log keeps: full (default), "
+             "skeleton (name, params, required, description length, hash) or names. "
+             "Shaped rows are stamped \"_shaped\".",
+    )
+    obs_group.add_argument(
+        "--obs-wire-tools-keep", default=None, metavar="PATTERNS",
+        help="Comma-separated fnmatch patterns kept verbatim despite "
+             "--obs-wire-tools, e.g. 'mcp__insurance__*'.",
+    )
+    obs_group.add_argument(
+        "--no-collapse-structures", action="store_true", default=False,
+        help="In flow redaction, do not collapse a repeated dict/list to a "
+             "'seen_node' marker (strings still collapse).",
+    )
+    obs_group.add_argument("--no-obs", action="store_true", default=False,
+                           help="Disable all tracing for this run.")
+    return parser.parse_args(argv)
+
+
 def main() -> None:
     import anthropic
 
-    client = anthropic.Anthropic()
-    config = _load_config()
-    session: CmaSession | None = None
+    args = _parse_args()
+    overrides: dict[str, Any] = {}
+    if args.wire:
+        overrides["wire"] = True
+    if args.obs_redact:
+        overrides["redact"] = args.obs_redact
+    if args.obs_wire_tools:
+        overrides["wire_tools"] = args.obs_wire_tools
+    if args.obs_wire_tools_keep:
+        overrides["wire_tools_keep"] = tuple(
+            p.strip() for p in args.obs_wire_tools_keep.split(",") if p.strip())
+    if args.no_collapse_structures:
+        overrides["collapse_structures"] = False
+    if args.no_obs:
+        overrides["enabled"] = False
 
-    print("Managed Agents insurance REPL. Run /setup first if you haven't. /help for commands.\n")
-    print(_HELP)
+    with agent_obs.Observability.start(agent_obs.ObsConfig.from_env(**overrides),
+                                      front_end="cma") as obs:
+        # Managed Agents traffic is ordinary HTTPS to the Anthropic API, so the same
+        # capture proxy that records /v1/messages records the session endpoints too —
+        # base_url is all it takes. None when wire capture is off.
+        client = (anthropic.Anthropic(base_url=obs.base_url) if obs.base_url
+                  else anthropic.Anthropic())
+        config = _load_config()
+        session: CmaSession | None = None
 
-    def prompt() -> str:
-        return f"({session.role.value}:{session.identity})> " if session else "(no session)> "
+        print("Managed Agents insurance REPL. Run /setup first if you haven't. /help for commands.\n")
+        if obs.enabled:
+            wire = f", wire -> {obs.base_url}" if obs.base_url else ""
+            print(f"Tracing: run {obs.run_id} (redact={obs.config.redact}{wire}). /obs for detail.")
+        print(_HELP)
 
-    while True:
-        try:
-            line = input(prompt()).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not line:
-            continue
+        def prompt() -> str:
+            return f"({session.role.value}:{session.identity})> " if session else "(no session)> "
 
-        if line.startswith("/"):
-            parts = line.split()
-            cmd, args = parts[0], parts[1:]
-            if cmd in ("/quit", "/exit"):
+        while True:
+            try:
+                line = input(prompt()).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
                 break
-            if cmd == "/help":
-                print(_HELP)
-            elif cmd == "/setup":
-                config = setup(client)
-                print(f"Setup complete. environment={config['environment_id']}, "
-                      f"agents={list(config['agents'])}, memory_stores={list(config['memory_stores'])}")
-            elif cmd == "/whoami":
-                print("No session." if session is None else f"{session.role.value} / {session.identity}")
-            elif cmd == "/adjuster":
-                if not config.get("environment_id"):
-                    print("Run /setup first.")
-                elif not args or tools.find_adjuster(args[0]) is None:
-                    print("Usage: /adjuster <known-user-id>")
-                else:
-                    session = CmaSession(client, config, Role.ADJUSTER, args[0])
-                    print(f"Adjuster session started for '{args[0]}' (session {session.session_id}).")
-            elif cmd == "/insurer":
-                if not config.get("environment_id"):
-                    print("Run /setup first.")
-                elif not args or tools.find_insurer(args[0]) is None:
-                    print("Usage: /insurer <known-insurer-id>")
-                else:
-                    session = CmaSession(client, config, Role.INSURER, args[0])
-                    print(f"Insurer session started for '{args[0]}' (session {session.session_id}).")
-            elif cmd == "/agent":
-                if not config.get("environment_id"):
-                    print("Run /setup first.")
-                else:
-                    print(run_agent_maintenance(client, config))
-            else:
-                print(f"Unknown command '{cmd}'. Type /help.")
-            continue
+            if not line:
+                continue
 
-        if session is None:
-            print("Start a session first: /adjuster <name> or /insurer <id>.")
-            continue
-        try:
-            print(session.send(line))
-        except Exception as exc:
-            print(f"[error: {type(exc).__name__}: {exc}]")
+            if line.startswith("/"):
+                parts = line.split()
+                cmd, args_ = parts[0], parts[1:]
+                obs.events.info("repl.command", command=cmd, argc=len(args_))
+                if cmd in ("/quit", "/exit"):
+                    break
+                if cmd == "/help":
+                    print(_HELP)
+                elif cmd == "/obs":
+                    from repl import _print_obs   # shared with the local REPL
+                    _print_obs(args_)
+                elif cmd == "/setup":
+                    config = setup(client)
+                    obs.events.info("cma.setup", environment=config.get("environment_id"),
+                                    agents=list(config.get("agents") or {}))
+                    print(f"Setup complete. environment={config['environment_id']}, "
+                          f"agents={list(config['agents'])}, memory_stores={list(config['memory_stores'])}")
+                elif cmd == "/whoami":
+                    print("No session." if session is None else f"{session.role.value} / {session.identity}")
+                elif cmd == "/adjuster":
+                    if not config.get("environment_id"):
+                        print("Run /setup first.")
+                    elif not args_ or tools.find_adjuster(args_[0]) is None:
+                        print("Usage: /adjuster <known-user-id>")
+                    else:
+                        session = CmaSession(client, config, Role.ADJUSTER, args_[0])
+                        print(f"Adjuster session started for '{args_[0]}' (session {session.session_id}).")
+                elif cmd == "/insurer":
+                    if not config.get("environment_id"):
+                        print("Run /setup first.")
+                    elif not args_ or tools.find_insurer(args_[0]) is None:
+                        print("Usage: /insurer <known-insurer-id>")
+                    else:
+                        session = CmaSession(client, config, Role.INSURER, args_[0])
+                        print(f"Insurer session started for '{args_[0]}' (session {session.session_id}).")
+                elif cmd == "/agent":
+                    if not config.get("environment_id"):
+                        print("Run /setup first.")
+                    else:
+                        print(run_agent_maintenance(client, config))
+                else:
+                    print(f"Unknown command '{cmd}'. Type /help.")
+                continue
+
+            if session is None:
+                print("Start a session first: /adjuster <name> or /insurer <id>.")
+                continue
+            try:
+                print(session.send(line))
+            except Exception as exc:
+                obs.events.error("cma.turn_failed", error=f"{type(exc).__name__}: {exc}")
+                print(f"[error: {type(exc).__name__}: {exc}]")
+
+        if obs.enabled:
+            print(f"Trace written: {obs.paths().get('events', '(events off)')}")
 
 
 if __name__ == "__main__":

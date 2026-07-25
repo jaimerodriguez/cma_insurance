@@ -128,6 +128,23 @@
     }
   },
   {
+    "name": "retrieve_policies",
+    "description": "List every policy held by a given insurer (policyholder).  Use this to see which policies a policyholder holds (e.g. before filing a claim against one of them).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "insurer_id": {
+          "type": "string",
+          "description": "The insurer's id whose policies to list (e.g. \"ins-1001\")."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "insurer_id"
+      ]
+    }
+  },
+  {
     "name": "list_escalations",
     "description": "List the escalations awaiting a given adjuster's decision.",
     "input_schema": {
@@ -156,7 +173,7 @@
         },
         "type": {
           "type": "integer",
-          "description": "One or more ``ReportType`` flags describing the loss. Combine with ``|``, e.g. ``ReportType.STOLEN_CAR | ReportType.CAR_ACCIDENT``. Integer bitmask; combine values by adding. Members: STOLEN_CAR=1, STOLEN_OTHER=2, CAR_ACCIDENT=4."
+          "description": "One or more ``ReportType`` flags describing the loss. Combine with ``|`` (or by adding the values) when a single event caused several kinds of loss, e.g. ``STOLEN_CAR | CAR_ACCIDENT`` = 5, or ``HOME_ACCIDENT | HOME_NATURAL_DISASTER`` = 48 for storm damage that also burst a pipe. A dwelling loss (any HOME_* flag) raises the auto-approval ceilings during triage, so pick the home flags for home losses even when the claim sits on a non-HOME policy. Integer bitmask; combine values by adding. Members: STOLEN_CAR=1, STOLEN_OTHER=2, CAR_ACCIDENT=4, HOME_THEFT=8, HOME_ACCIDENT=16, HOME_NATURAL_DISASTER=32."
         },
         "details": {
           "type": "string",
@@ -187,7 +204,7 @@
   },
   {
     "name": "process_incident",
-    "description": "Triage an incident for approval using the given dynamic policies.  The decision is delegated to ``policies.should_auto_approve`` (see ``DynamicPolicies``), which considers the incident cost, whether the policyholder is a VIP (read from the insurer record), whether the policy is a HOME policy, whether the policyholder is upset, and any agent override.  If it auto-approves, the resolution is set to APPROVED via ``update_resolution`` (adjuster \"system\") with the reason recorded. Otherwise the incident is escalated to its adjuster (resolution stays ``INPROGRESS``) and the escalation reason is stored on the incident.  Whether the insurer is upset is a judgement call, so it is supplied by the caller rather than computed here: the agent should read the incident and the insurer's history and decide. It defaults to False when unknown.",
+    "description": "Triage an incident for approval using the given dynamic policies.  The decision is delegated to ``policies.should_auto_approve`` (see ``DynamicPolicies``), which considers the incident cost, whether the policyholder is a VIP (read from the insurer record), whether this is a home claim, whether the policyholder is upset, and any agent override. A claim counts as *home* when its policy is ``PolicyType.HOME`` or its ``incident_type`` carries any ``ReportType.HOME`` flag.  If it auto-approves, the resolution is set to APPROVED via ``update_resolution`` (adjuster \"system\") with the reason recorded.  An incident already at ``ESCALATED_TO_MANAGEMENT`` is returned untouched: management owns the decision, and the pass is run repeatedly.  Otherwise, in order:  1. If the cost exceeds every authorization band (``required_authorization`` returns ``OVERRIDE_NEEDED``), the incident is sent to management via ``escalate_to_management`` \u2014 status ``ESCALATED_TO_MANAGEMENT``, resolution still ``INPROGRESS``. No adjuster could decide it, so this happens regardless of ``can_assign`` or whether the incident is already assigned. 2. Else if it is unassigned, it is routed to the lowest-authorization adjuster who qualifies \u2014 or left untouched when ``can_assign`` is False or nobody qualifies. 3. Else it is escalated to its own adjuster (resolution stays ``INPROGRESS``) and the escalation reason is stored on the incident.  Whether the insurer is upset is a judgement call, so it is supplied by the caller rather than computed here: the agent should read the incident and the insurer's history and decide. It defaults to False when unknown.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -318,8 +335,30 @@
     }
   },
   {
+    "name": "escalate_to_management",
+    "description": "Hand an incident up to management, for any reason.  Sets ``status`` to ``ReportStatus.ESCALATED_TO_MANAGEMENT``, stores ``reason`` on the incident's ``resolution_reason``, and logs a date-stamped line to its history. Any pending adjuster escalation for the incident is withdrawn from the queue, because the decision is no longer the adjuster's to make.  The claim stays live: ``resolution`` is left at ``INPROGRESS`` until management decides, typically by calling ``update_resolution`` with ``Resolution.MANAGEMENT_OVERRIDE``. This is deliberately *not* a resolution of its own \u2014 an escalation is a routing step, and treating it as an outcome would stamp ``resolved_date`` and let the auto-close pass close a claim nobody has decided.  An adjuster may call this for any reason (a conflict of interest, a policyholder threatening litigation, an ambiguous exclusion). The agent calls it automatically when a claim's cost exceeds every authorization band \u2014 see ``AuthorizationLevel.OVERRIDE_NEEDED`` and ``process_incident``.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "incident_id": {
+          "type": "string",
+          "description": "The incident/case id to escalate (e.g. \"case-3001\")."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why this needs management. Free text, stored on the incident and noted in its history."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "incident_id",
+        "reason"
+      ]
+    }
+  },
+  {
     "name": "update_resolution",
-    "description": "Set an incident's resolution and record who decided it (and why).  Appends a date-stamped line to the incident's history noting the new resolution, the deciding adjuster, and the reason if given. When ``reason`` is provided it is also stored on the incident's ``resolution_reason``. If the resolution is APPROVED or DENIED, any pending escalation for this incident is removed from the queue (this is how an adjuster clears an escalation they were asked to decide).",
+    "description": "Set an incident's resolution and record who decided it (and why).  Appends a date-stamped line to the incident's history noting the new resolution, the deciding adjuster, and the reason if given. When ``reason`` is provided it is also stored on the incident's ``resolution_reason``. If the resolution is *terminal* (see ``Resolution.is_terminal`` \u2014 APPROVED, DENIED or MANAGEMENT_OVERRIDE) the incident's ``resolved_date`` is stamped and any pending escalation for this incident is removed from the queue (this is how an adjuster clears an escalation they were asked to decide).",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -337,9 +376,10 @@
             "approved",
             "denied",
             "inprogress",
-            "disputed"
+            "disputed",
+            "management_override"
           ],
-          "description": "The new ``Resolution`` (or its string value, e.g. \"approved\")."
+          "description": "The new ``Resolution`` (or its string value, e.g. \"approved\", \"management_override\")."
         },
         "reason": {
           "type": "string",
@@ -370,6 +410,7 @@
             "new",
             "open",
             "notified",
+            "escalated_to_management",
             "closed"
           ],
           "description": "The new ``ReportStatus`` (or its string value, e.g. \"closed\")."
@@ -457,7 +498,7 @@
   },
   {
     "name": "close_stale_resolved",
-    "description": "Auto-close incidents that have been resolved (approved/denied) a while.  Scans all incidents and sets ``status`` to ``ReportStatus.CLOSED`` for any whose ``resolution`` is APPROVED or DENIED, whose ``resolved_date`` is more than ``minutes`` minutes ago, and which are not already CLOSED. Intended to be run on a schedule (e.g. once a day) or on demand.",
+    "description": "Auto-close incidents that have been resolved a while.  Scans all incidents and sets ``status`` to ``ReportStatus.CLOSED`` for any whose ``resolution`` is terminal (see ``Resolution.is_terminal`` \u2014 APPROVED, DENIED or MANAGEMENT_OVERRIDE), whose ``resolved_date`` is more than ``minutes`` minutes ago, and which are not already CLOSED. Intended to be run on a schedule (e.g. once a day) or on demand.",
     "input_schema": {
       "type": "object",
       "properties": {

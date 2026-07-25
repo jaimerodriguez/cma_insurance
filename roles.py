@@ -45,7 +45,8 @@ ROLE_TOOLS: dict[Role, set[str]] = {
         "list_incidents", "get_incident_details", "get_adjuster_details",
         "find_adjuster", "find_insurer", "find_policy", "list_escalations",
         # decide
-        "process_incident", "escalate_incident", "update_resolution", "update_status",
+        "process_incident", "escalate_incident", "escalate_to_management",
+        "update_resolution", "update_status",
         # notify
         "notify_adjuster", "notify_insurer", "notify_update",
         # log
@@ -55,13 +56,14 @@ ROLE_TOOLS: dict[Role, set[str]] = {
     },
     Role.INSURER: {
         "create_incident", "get_incident_details", "list_incidents_for_insurer",
-        "find_policy", "find_insurer",
+        "find_policy", "retrieve_policies", "find_insurer",
         "append_insurer_history", "append_insurer_preferences",
     },
     Role.AGENT: {
         "close_stale_resolved", "list_incidents", "get_incident_details", "update_status",
-        "process_incident", "assign_incident",
+        "process_incident", "assign_incident", "escalate_to_management",
         "find_adjuster", "list_adjusters", "get_adjuster_details",
+        "retrieve_policies",
     },
 }
 
@@ -96,6 +98,9 @@ You can ONLY take adjuster actions, and only for this adjuster. Use the tools to
 - list and inspect this adjuster's incidents and escalations,
 - approve or deny incidents (individually or in bulk when asked, e.g. "approve all"),
 - escalate incidents, update status, and notify the adjuster and policyholder,
+- hand a claim up to management for any reason (escalate_to_management with a
+  reason) — use this when the decision shouldn't be this adjuster's, e.g. a
+  conflict of interest, threatened litigation, or an ambiguous exclusion,
 - log history and notes on incidents, insurers, and this adjuster.
 
 Auto-approval policies for this adjuster (from agent memory) are:
@@ -112,7 +117,7 @@ concisely."""
 _INSURER_PROMPT = """You are an AI assistant speaking directly with policyholder \
 {name} (insurer id: "{insurer_id}"). You represent the insurance company to this customer.
 
-You can ONLY do two things for this policyholder:
+Your goal is to do two things for this policyholder:
 1. Help them file a new incident/claim. Have a natural conversation to gather what
    create_incident needs: which policy (use find_policy / find_insurer to confirm their
    policies), the type(s) of loss, a description, and an estimated cost. New claims are
@@ -122,6 +127,11 @@ You can ONLY do two things for this policyholder:
 2. Answer questions about the status of THIS policyholder's claims (use
    list_incidents_for_insurer / get_incident_details).
 
+You should be helpful, for example, if they don't know their policy and need you to look it up, its OK. 
+If they want to file a claim and only have one policy, use that as the default. Just confirm it. 
+
+Do not get creative asking for police reports or similar tasks. Stay factual. 
+If the insurer sounds frustrated, note it down in both the created Incident's history and the Insurer's history.  
 Never approve, deny, escalate, or take adjuster actions — you don't have those tools.
 Never reveal or discuss other policyholders' claims. Be warm and clear."""
 
@@ -135,19 +145,24 @@ Your tasks each run:
    process_incident with a policies object that enables assignment, e.g.
    {"can_assign": true}. With can_assign set, process_incident will:
      - auto-approve the claim if it's within the approval ceilings; otherwise
+     - send the claim to management (status escalated_to_management) when its cost
+       exceeds every authorization limit, since no adjuster may decide it; or
      - route an unassigned incident to an adjuster whose authorization_level fits
        the claim cost (using the policy's authorization_low / authorization_medium
        / authorization_high limits); or
      - escalate an incident that already has an adjuster to that adjuster.
    Routing only assigns an adjuster — it does not decide the claim in the same
    step, so call process_incident again (with the same policies) on an incident it
-   just assigned so it gets approved or escalated. If process_incident leaves an
-   incident unassigned (its cost exceeds every authorization limit), report it as
-   needing manual routing. You may override the authorization_* limits in the
-   policies object when a run needs different cost bands.
+   just assigned so it gets approved or escalated. Report any claim that went to
+   management as awaiting a management override, and any claim left unassigned
+   (nobody holds sufficient authorization) as needing manual routing. You may
+   override the authorization_* limits in the policies object when a run needs
+   different cost bands, and you can call escalate_to_management yourself when a
+   claim needs management for a reason other than cost.
 
 2. Close stale claims. Use close_stale_resolved to find and close claims that have
-   been resolved (approved or denied) for more than 30 minutes.
+   been resolved for more than 30 minutes — approved, denied, or settled by a
+   management override.
 
 Report concisely what you routed, triaged, and closed."""
 

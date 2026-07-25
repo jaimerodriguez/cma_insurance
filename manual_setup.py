@@ -8,9 +8,6 @@ from anthropic import (
     Anthropic
 )
 
-# Load environment variables from the .env file so ANTHROPIC_API_KEY is
-# available to the Anthropic SDK (which reads it automatically).
-load_dotenv()
 
 from anthropic.types.beta import (
     BetaEnvironment,

@@ -34,34 +34,32 @@ import storage
 # Placeholder adjuster id for incidents that have not been routed yet.
 UNASSIGNED = "unassigned"
 
-# Ordering for AuthorizationLevel (LOW < MEDIUM < HIGH).
-_AUTH_RANK: dict[AuthorizationLevel, int] = {
-    AuthorizationLevel.LOW: 0,
-    AuthorizationLevel.MEDIUM: 1,
-    AuthorizationLevel.HIGH: 2,
-}
-
-
 def _select_adjuster(policies: DynamicPolicies, cost: int) -> str | None:
     """Pick the id of the lowest-authorization adjuster able to handle ``cost``.
 
     Uses ``policies.required_authorization(cost)`` to find the minimum level,
     then returns the qualifying adjuster with the lowest authorization (ties
     broken by user_id for determinism). The "unassigned" placeholder is never
-    selected. Returns ``None`` when the cost exceeds every limit or no adjuster
-    has sufficient authorization.
+    selected.
+
+    Returns ``None`` when no adjuster has sufficient authorization. Callers must
+    not read that as "cost is beyond every band" — those two cases are different
+    and are distinguished by ``required_authorization`` returning
+    ``OVERRIDE_NEEDED``, which ``process_incident`` checks *before* calling here.
+    An adjuster can never hold OVERRIDE_NEEDED (``Adjuster`` rejects it), so if
+    one did reach this function the rank comparison would find no candidate
+    anyway.
     """
     required = policies.required_authorization(cost)
-    if required is None:
-        return None
-    need = _AUTH_RANK[required]
     candidates = [
         a for a in list_adjusters()
-        if a.user_id != UNASSIGNED and _AUTH_RANK[a.authorization_level] >= need
+        if a.user_id != UNASSIGNED
+        and a.authorization_level.is_assignable
+        and a.authorization_level.rank >= required.rank
     ]
     if not candidates:
         return None
-    best = min(candidates, key=lambda a: (_AUTH_RANK[a.authorization_level], a.user_id))
+    best = min(candidates, key=lambda a: (a.authorization_level.rank, a.user_id))
     return best.user_id
 
 
@@ -169,6 +167,21 @@ def find_policy(policy_id: str) -> Policy | None:
     return storage.load_policies().get(policy_id)
 
 
+def retrieve_policies(insurer_id: str) -> list[Policy]:
+    """List every policy held by a given insurer (policyholder).
+
+    Use this to see which policies a policyholder holds (e.g. before filing a
+    claim against one of them).
+
+    Args:
+        insurer_id: The insurer's id whose policies to list (e.g. "ins-1001").
+
+    Returns:
+        A list of ``Policy`` objects held by that insurer (empty if none).
+    """
+    return [p for p in storage.load_policies().values() if p.insurer_id == insurer_id]
+
+
 def get_adjuster_details(incident_id: str) -> Adjuster | None:
     """Resolve the adjuster assigned to a given incident.
 
@@ -224,7 +237,12 @@ def create_incident(
     Args:
         adjuster_id: Id of the adjuster who will handle the claim (e.g. "jaime").
         type: One or more ``ReportType`` flags describing the loss. Combine
-            with ``|``, e.g. ``ReportType.STOLEN_CAR | ReportType.CAR_ACCIDENT``.
+            with ``|`` (or by adding the values) when a single event caused
+            several kinds of loss, e.g. ``STOLEN_CAR | CAR_ACCIDENT`` = 5, or
+            ``HOME_ACCIDENT | HOME_NATURAL_DISASTER`` = 48 for storm damage that
+            also burst a pipe. A dwelling loss (any HOME_* flag) raises the
+            auto-approval ceilings during triage, so pick the home flags for
+            home losses even when the claim sits on a non-HOME policy.
         details: Free-text description of the incident.
         insurer_id: Id of the insurer/policyholder (e.g. "ins-1001").
         policy_id: Id of the policy the claim is filed against (e.g. "pol-2001").
@@ -423,15 +441,17 @@ def update_resolution(
     Appends a date-stamped line to the incident's history noting the new
     resolution, the deciding adjuster, and the reason if given. When ``reason``
     is provided it is also stored on the incident's ``resolution_reason``. If
-    the resolution is APPROVED or DENIED, any pending escalation for this
-    incident is removed from the queue (this is how an adjuster clears an
-    escalation they were asked to decide).
+    the resolution is *terminal* (see ``Resolution.is_terminal`` — APPROVED,
+    DENIED or MANAGEMENT_OVERRIDE) the incident's ``resolved_date`` is stamped
+    and any pending escalation for this incident is removed from the queue (this
+    is how an adjuster clears an escalation they were asked to decide).
 
     Args:
         incident_id: The incident/case id to update (e.g. "case-3001").
         adjuster: Id of the adjuster making the decision (use "system" for
             automated approvals).
-        resolution: The new ``Resolution`` (or its string value, e.g. "approved").
+        resolution: The new ``Resolution`` (or its string value, e.g. "approved",
+            "management_override").
         reason: Optional free-text explanation, stored on the incident and
             noted in its history.
 
@@ -444,7 +464,7 @@ def update_resolution(
         incident.resolution = resolution
         if reason is not None:
             incident.resolution_reason = reason
-        if resolution in (Resolution.APPROVED, Resolution.DENIED):
+        if resolution.is_terminal:
             incident.resolved_date = datetime.now(timezone.utc)
         note = f"resolution set to {resolution.value} by {adjuster}"
         if reason:
@@ -455,7 +475,7 @@ def update_resolution(
     if incident is None:
         return None
 
-    if resolution in (Resolution.APPROVED, Resolution.DENIED):
+    if resolution.is_terminal:
         escalations = storage.load_escalations()
         if escalations.pop(incident_id, None) is not None:
             storage.save_escalations(escalations)
@@ -621,6 +641,52 @@ def escalate_incident(
     return escalation
 
 
+def escalate_to_management(incident_id: str, reason: str) -> Incident | None:
+    """Hand an incident up to management, for any reason.
+
+    Sets ``status`` to ``ReportStatus.ESCALATED_TO_MANAGEMENT``, stores ``reason``
+    on the incident's ``resolution_reason``, and logs a date-stamped line to its
+    history. Any pending adjuster escalation for the incident is withdrawn from
+    the queue, because the decision is no longer the adjuster's to make.
+
+    The claim stays live: ``resolution`` is left at ``INPROGRESS`` until
+    management decides, typically by calling ``update_resolution`` with
+    ``Resolution.MANAGEMENT_OVERRIDE``. This is deliberately *not* a resolution
+    of its own — an escalation is a routing step, and treating it as an outcome
+    would stamp ``resolved_date`` and let the auto-close pass close a claim
+    nobody has decided.
+
+    An adjuster may call this for any reason (a conflict of interest, a
+    policyholder threatening litigation, an ambiguous exclusion). The agent calls
+    it automatically when a claim's cost exceeds every authorization band — see
+    ``AuthorizationLevel.OVERRIDE_NEEDED`` and ``process_incident``.
+
+    Args:
+        incident_id: The incident/case id to escalate (e.g. "case-3001").
+        reason: Why this needs management. Free text, stored on the incident and
+            noted in its history.
+
+    Returns:
+        The updated ``Incident``, or ``None`` if no incident has that id.
+    """
+    incident = get_incident_details(incident_id)
+    if incident is None:
+        return None
+
+    escalations = storage.load_escalations()
+    if escalations.pop(incident_id, None) is not None:
+        storage.save_escalations(escalations)
+
+    def mutate(updated: Incident) -> None:
+        updated.status = ReportStatus.ESCALATED_TO_MANAGEMENT
+        updated.resolution_reason = reason
+        updated.history = _append_line(
+            updated.history, _stamp(f"escalated to management ({reason})")
+        )
+
+    return storage.update_incident(incident_id, mutate)
+
+
 def process_incident(
     incident_id: str,
     policies: DynamicPolicies | dict[str, Any] | None = None,
@@ -630,13 +696,30 @@ def process_incident(
 
     The decision is delegated to ``policies.should_auto_approve`` (see
     ``DynamicPolicies``), which considers the incident cost, whether the
-    policyholder is a VIP (read from the insurer record), whether the policy is
-    a HOME policy, whether the policyholder is upset, and any agent override.
+    policyholder is a VIP (read from the insurer record), whether this is a home
+    claim, whether the policyholder is upset, and any agent override. A claim
+    counts as *home* when its policy is ``PolicyType.HOME`` or its
+    ``incident_type`` carries any ``ReportType.HOME`` flag.
 
     If it auto-approves, the resolution is set to APPROVED via
     ``update_resolution`` (adjuster "system") with the reason recorded.
-    Otherwise the incident is escalated to its adjuster (resolution stays
-    ``INPROGRESS``) and the escalation reason is stored on the incident.
+
+    An incident already at ``ESCALATED_TO_MANAGEMENT`` is returned untouched:
+    management owns the decision, and the pass is run repeatedly.
+
+    Otherwise, in order:
+
+    1. If the cost exceeds every authorization band
+       (``required_authorization`` returns ``OVERRIDE_NEEDED``), the incident is
+       sent to management via ``escalate_to_management`` — status
+       ``ESCALATED_TO_MANAGEMENT``, resolution still ``INPROGRESS``. No adjuster
+       could decide it, so this happens regardless of ``can_assign`` or whether
+       the incident is already assigned.
+    2. Else if it is unassigned, it is routed to the lowest-authorization
+       adjuster who qualifies — or left untouched when ``can_assign`` is False
+       or nobody qualifies.
+    3. Else it is escalated to its own adjuster (resolution stays
+       ``INPROGRESS``) and the escalation reason is stored on the incident.
 
     Whether the insurer is upset is a judgement call, so it is supplied by the
     caller rather than computed here: the agent should read the incident and
@@ -651,19 +734,36 @@ def process_incident(
             Defaults to False.
 
     Returns:
-        The incident after triage (resolution APPROVED if auto-approved, else
-        unchanged and now in the escalation queue), or ``None`` if no incident
-        has that id.
+        The incident after triage — APPROVED if auto-approved, status
+        ESCALATED_TO_MANAGEMENT if it needs an override, newly assigned if it was
+        routed, otherwise unchanged and now in the adjuster escalation queue.
+        ``None`` if no incident has that id.
     """
     policies = DynamicPolicies.coerce(policies)
     incident = get_incident_details(incident_id)
     if incident is None:
         return None
 
+    # Already with management: not the agent's to re-triage. Returning early
+    # keeps this idempotent — the claim stays selected by "still INPROGRESS"
+    # filters, so a scheduled pass revisits it every run, and without this guard
+    # each visit would re-stamp the history and re-decide over management's head.
+    # It also outranks agent_override_autoapprove on purpose: an escalation to
+    # management is precisely the case where the agent stops deciding.
+    if incident.status is ReportStatus.ESCALATED_TO_MANAGEMENT:
+        return incident
+
     insurer = find_insurer(incident.insurer_id)
     policy = find_policy(incident.policy_id)
     is_vip = bool(insurer and insurer.is_VIP)
-    is_home = bool(policy and policy.policy_type == PolicyType.HOME)
+    # A home claim by *either* measure: the coverage it was filed against, or the
+    # kind of loss reported. A dwelling loss reported against a non-HOME policy
+    # still gets the home ceilings — the alternative is that HOME_THEFT on an
+    # AUTO policy is silently treated as a car claim.
+    is_home = bool(
+        (policy and policy.policy_type == PolicyType.HOME)
+        or (incident.incident_type & ReportType.HOME)
+    )
 
     approve, reason = policies.should_auto_approve(
         incident.estimate_cost, is_vip, is_home, insurer_upset
@@ -671,9 +771,22 @@ def process_incident(
     if approve:
         return update_resolution(incident_id, "system", Resolution.APPROVED, reason=reason)
 
-    # Not auto-approved. An unassigned incident must not be escalated to the
-    # "unassigned" placeholder: route it to an adjuster if the policy allows,
-    # otherwise leave it untouched for a later pass.
+    # Not auto-approved. Before any routing: if the cost is beyond every
+    # authorization band, no adjuster may decide it however it is assigned, so it
+    # goes straight to management. This is checked ahead of `can_assign` on
+    # purpose — `can_assign=False` means "don't pick an adjuster", not "strand a
+    # claim nobody is allowed to decide".
+    required = policies.required_authorization(incident.estimate_cost)
+    if required is AuthorizationLevel.OVERRIDE_NEEDED:
+        return escalate_to_management(
+            incident_id,
+            f"cost {incident.estimate_cost} exceeds every authorization limit "
+            f"(high {policies.authorization_high}); needs a management override",
+        )
+
+    # An unassigned incident must not be escalated to the "unassigned"
+    # placeholder: route it to an adjuster if the policy allows, otherwise leave
+    # it untouched for a later pass.
     if incident.adjuster_id == UNASSIGNED:
         if not policies.can_assign:
             return incident  # do nothing
@@ -692,12 +805,13 @@ def process_incident(
 # --- maintenance ------------------------------------------------------------
 
 def close_stale_resolved(minutes: int = 30) -> list[Incident]:
-    """Auto-close incidents that have been resolved (approved/denied) a while.
+    """Auto-close incidents that have been resolved a while.
 
     Scans all incidents and sets ``status`` to ``ReportStatus.CLOSED`` for any
-    whose ``resolution`` is APPROVED or DENIED, whose ``resolved_date`` is more
-    than ``minutes`` minutes ago, and which are not already CLOSED. Intended to
-    be run on a schedule (e.g. once a day) or on demand.
+    whose ``resolution`` is terminal (see ``Resolution.is_terminal`` — APPROVED,
+    DENIED or MANAGEMENT_OVERRIDE), whose ``resolved_date`` is more than
+    ``minutes`` minutes ago, and which are not already CLOSED. Intended to be run
+    on a schedule (e.g. once a day) or on demand.
 
     Args:
         minutes: Age threshold in minutes since ``resolved_date``. Defaults to 30.
@@ -710,7 +824,7 @@ def close_stale_resolved(minutes: int = 30) -> list[Incident]:
     closed: list[Incident] = []
     for incident in storage.load_incidents().values():
         if (
-            incident.resolution in (Resolution.APPROVED, Resolution.DENIED)
+            incident.resolution.is_terminal
             and incident.status is not ReportStatus.CLOSED
             and incident.resolved_date is not None
             and incident.resolved_date < cutoff
@@ -738,12 +852,14 @@ AGENT_TOOLS: list[Callable[..., Any]] = [
     list_adjusters,
     find_insurer,
     find_policy,
+    retrieve_policies,
     list_escalations,
     # -- create --
     create_incident,
     # -- incident workflow --
     process_incident,
     escalate_incident,
+    escalate_to_management,
     update_resolution,
     update_status,
     assign_incident,

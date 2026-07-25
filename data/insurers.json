@@ -5,7 +5,7 @@
     "address": "1420 Pine St, Seattle WA 98101",
     "phone_number": "206-555-0110",
     "preferences": "Prefers to be contacted in Spanish when possible.",
-    "history": "7/5/2026 - called to confirm claim received, reassured.",
+    "history": "7/5/2026 - called to confirm claim received, reassured.\n7/24/2026 - Maria contacted us frustrated \u2014 reported being unable to file a flood damage claim for 21 days due to website UX problems. Assisting with claim intake.",
     "is_VIP": true
   },
   "ins-1002": {
@@ -22,6 +22,8 @@
     "full_name": "Emily Nakamura",
     "address": "300 Aspen Way, Boise ID 83702",
     "phone_number": "208-555-0130",
+    "preferences": null,
+    "history": null,
     "is_VIP": true
   },
   "ins-1004": {
@@ -29,6 +31,8 @@
     "full_name": "Liam O'Brien",
     "address": "55 Birch Ave, Spokane WA 99201",
     "phone_number": "509-555-0140",
+    "preferences": null,
+    "history": null,
     "is_VIP": false
   },
   "ins-1005": {
@@ -36,6 +40,80 @@
     "full_name": "Priya Patel",
     "address": "720 Cedar Blvd, Bend OR 97701",
     "phone_number": "541-555-0150",
+    "preferences": null,
+    "history": null,
+    "is_VIP": true
+  },
+  "ins-1006": {
+    "id": "ins-1006",
+    "full_name": "Daniel Mercer",
+    "address": "611 Alder St, Seattle WA 98104",
+    "phone_number": "206-555-0161",
+    "preferences": "Prefers a text message before any phone call.",
+    "history": "7/3/2026 - Daniel was very upset after the initial tow was delayed; he became calmer once the next steps were explained.\n7/19/2026 - Frustrated that two open matters have not been resolved; requests one point of contact.\n7/25/2026 - notified: incident a3f0100c-5853-4c38-a20e-a6ee12bd57ee resolution is now approved",
+    "is_VIP": false
+  },
+  "ins-1007": {
+    "id": "ins-1007",
+    "full_name": "Aisha Rahman",
+    "address": "1842 Hawthorne Ave, Portland OR 97214",
+    "phone_number": "503-555-0162",
+    "preferences": "Prefers email and concise written status updates.",
+    "history": "7/11/2026 - Aisha was calm and organized; supplied an inventory, receipts, and police report without prompting.\n7/22/2026 - Asked for a written explanation of the review timeline.",
+    "is_VIP": true
+  },
+  "ins-1008": {
+    "id": "ins-1008",
+    "full_name": "Carlos Vega",
+    "address": "907 Market St, Tacoma WA 98402",
+    "phone_number": "253-555-0163",
+    "preferences": "Spanish-language callback preferred.",
+    "history": "2/5/2026 - Carlos sounded uncertain about the loss sequence and repeatedly changed the reported location and time.\n3/14/2026 - Adjuster noted that several details contradicted the earlier statement; obtain independent records before resolving.\n7/25/2026 - notified: incident 08d9ca6e-3814-4c08-97eb-7054eeb4d96d resolution is now denied",
+    "is_VIP": false
+  },
+  "ins-1009": {
+    "id": "ins-1009",
+    "full_name": "Hannah Brooks",
+    "address": "410 Willamette St, Eugene OR 97401",
+    "phone_number": "541-555-0164",
+    "preferences": "Calls are best after 3:00 p.m. Pacific.",
+    "history": "6/23/2026 - Hannah was frustrated because cleanup authorization had not been confirmed.\n7/18/2026 - Cooperative on follow-up and provided replacement-cost documentation.",
+    "is_VIP": false
+  },
+  "ins-1010": {
+    "id": "ins-1010",
+    "full_name": "Marcus Lee",
+    "address": "1227 Monroe St, Spokane WA 99201",
+    "phone_number": "509-555-0165",
+    "preferences": "Do not call during business hours; use the secure message portal.",
+    "history": "7/6/2026 - Marcus was concise and provided serial numbers for the missing equipment.\n7/17/2026 - Expressed concern about the delay but remained professional.",
+    "is_VIP": true
+  },
+  "ins-1011": {
+    "id": "ins-1011",
+    "full_name": "Sofia Alvarez",
+    "address": "730 Warm Springs Ave, Boise ID 83712",
+    "phone_number": "208-555-0166",
+    "preferences": "Prefers phone calls in the morning.",
+    "history": "7/16/2026 - Sofia was anxious and believed the new policy was already active; adjuster explained that the effective date is 8/1/2026.\n7/21/2026 - Requested escalation and a written coverage explanation.\n7/25/2026 - notified: incident 841d83ff-a0b1-420b-8293-5df5d4e196c1 resolution is now inprogress",
+    "is_VIP": false
+  },
+  "ins-1012": {
+    "id": "ins-1012",
+    "full_name": "Nathan Cole",
+    "address": "955 Riverside Blvd, Bend OR 97703",
+    "phone_number": "541-555-0167",
+    "preferences": "Voicemail is acceptable.",
+    "history": "4/15/2026 - Nathan was cooperative and promptly supplied photographs and purchase records.\n6/16/2026 - Frustrated by the coverage review but acknowledged that the policy had expired.",
+    "is_VIP": false
+  },
+  "ins-1013": {
+    "id": "ins-1013",
+    "full_name": "Olivia Bennett",
+    "address": "108 Lakeview Dr, Bellevue WA 98004",
+    "phone_number": "425-555-0168",
+    "preferences": "Prefers detailed email summaries after each conversation.",
+    "history": "7/9/2026 - Olivia provided dash-camera footage and a complete chronology.\n7/20/2026 - Sounded frustrated because the repair authorization remained pending; requested a supervisor review.",
     "is_VIP": true
   }
 }

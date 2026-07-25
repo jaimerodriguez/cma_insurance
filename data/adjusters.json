@@ -6,7 +6,8 @@
     "timezone": "America/Los_Angeles",
     "full_name": "Jaime Rodriguez",
     "preferences": "Do not share my phone number; tell them I will contact them.",
-    "history": "6/30/2026 - onboarded to the Cascadia region team."
+    "history": "6/30/2026 - onboarded to the Cascadia region team.",
+    "authorization_level": "low"
   },
   "sam": {
     "user_id": "sam",
@@ -25,12 +26,17 @@
     "timezone": "America/Boise",
     "full_name": "Jane Austin",
     "preferences": "Fine to share direct line with policyholders.",
-    "history": "5/15/2026 - recognized for fast claim turnaround.",
+    "history": "5/15/2026 - recognized for fast claim turnaround.\n7/25/2026 - notified: incident a3f0100c-5853-4c38-a20e-a6ee12bd57ee resolution is now approved",
     "authorization_level": "high"
   },
-
-  "unassigned" : { 
-     "user_id": "unassigned", 
-     "preferences": "Unassigned incidents can't be discussed with insurers."
+  "unassigned": {
+    "user_id": "unassigned",
+    "location": null,
+    "phone_number": null,
+    "timezone": null,
+    "full_name": null,
+    "preferences": "Unassigned incidents can't be discussed with insurers.",
+    "history": null,
+    "authorization_level": "low"
   }
 }
