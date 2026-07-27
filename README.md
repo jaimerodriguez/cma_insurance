@@ -385,6 +385,16 @@ lives in a Managed Agents **vault** keyed by endpoint URL and reaches the run vi
 `vault_ids`. `ensure_vault` reconciles those by URL, because the URL is what moves
 when the server is re-homed.
 
+**Deploying it.** For a public endpoint — which is what unattended runs need —
+see **[ACA_Deploy.md](ACA_Deploy.md)**: a `Dockerfile` and step-by-step Azure
+Container Apps setup, including how to start and stop it to keep the cost at
+zero between runs. Container Apps rather than Azure Functions because the
+Functions MCP extension would force all 40 tool schemas to be re-declared by
+hand in a vocabulary that cannot express our enums, nested objects, or nullable
+unions. The image is the deployable subset only — no `cma.py`, no `anthropic`,
+no Agent SDK; a test asserts the `COPY` list still covers `mcp_server`'s real
+import closure.
+
 #### What the facade cannot simply wrap
 
 Four places need more than delegation, and one is a genuine architectural split:
