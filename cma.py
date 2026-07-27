@@ -61,6 +61,20 @@ MODEL_BY_ROLE = {
 }
 CONFIG_FILE = storage.DATA_DIR / "cma_config.json"
 
+# Read timeout for the session event stream, in seconds.
+#
+# A backstop, not the mechanism: the loop in `CmaSession.send` now stops reading
+# as soon as the session says it is blocked on us, so a healthy turn never waits
+# on this. It exists because the SDK's default is `httpx.Timeout(timeout=10*60)`
+# (anthropic/_constants.py), and a stream that goes quiet for any *other* reason
+# should cost seconds, not ten minutes.
+#
+# It has to clear the longest legitimate gap between events — the model can think
+# for minutes without emitting — so this is deliberately generous. Tighten it only
+# with evidence from the event log; if it ever fires, that is a bug to chase, not
+# a number to lower.
+STREAM_TIMEOUT_S = 300.0
+
 # Adjusters that get a personal memory store provisioned at setup.
 MEMORY_ADJUSTERS = ["jaime", "sam", "jane"]
 
@@ -704,11 +718,15 @@ class CmaSession:
             while True:
                 legs += 1
                 # Stream-first: open the stream, then send inside it so no early event is missed.
-                with self.client.beta.sessions.events.stream(session_id=self.session_id) as stream:
+                with self.client.beta.sessions.events.stream(
+                        session_id=self.session_id, timeout=STREAM_TIMEOUT_S) as stream:
                     if to_send is not None:
                         self.client.beta.sessions.events.send(session_id=self.session_id, events=to_send)
                         to_send = None
                     tool_calls = []
+                    # Event ids the session says it is blocked on, from the most
+                    # recent `requires_action` idle. Empty until it tells us.
+                    awaiting: set[str] = set()
                     for event in stream:
                         etype = getattr(event, "type", None)
                         # Every event type at debug level: this is the only window
@@ -726,6 +744,11 @@ class CmaSession:
                                             # Present only for a subagent's call.
                                             thread=getattr(event, "session_thread_id", None))
                             tool_calls.append(event)
+                            # The idle can arrive before the calls it names, so
+                            # coverage is re-checked here too — see the
+                            # `session.status_idle` branch below.
+                            if awaiting and awaiting <= {c.id for c in tool_calls}:
+                                break
                         elif etype in ("session.thread_created",
                                        "session.thread_status_idle",
                                        "session.thread_status_terminated"):
@@ -747,10 +770,27 @@ class CmaSession:
                             terminated = True
                             break
                         elif etype == "session.status_idle":
-                            # Idle waiting on us (a custom tool) -> keep going; otherwise done.
                             stop = getattr(event, "stop_reason", None)
-                            if getattr(stop, "type", None) != "requires_action":
+                            stop_type = getattr(stop, "type", None)
+                            blocked_on = list(getattr(stop, "event_ids", None) or [])
+                            # Logged at info: without it the events log cannot tell
+                            # "idle, waiting on us" from "idle, done" after the fact,
+                            # which is what made this stall hard to see.
+                            obs.events.info("cma.idle", stop=stop_type,
+                                            blocked_on=len(blocked_on))
+                            if stop_type != "requires_action":
                                 terminated = False
+                                break
+                            # Idle waiting on *us*. The session emits nothing further
+                            # until we answer, so reading on only waits out the
+                            # client's socket timeout — which is where ~90 of every
+                            # 100 minutes of a run was going. Stop as soon as we hold
+                            # every event it named. Resolving fewer than all re-emits
+                            # idle with the remainder, so partial batches still work.
+                            awaiting = set(blocked_on)
+                            if not awaiting or awaiting <= {c.id for c in tool_calls}:
+                                # No ids given (older/other shape) falls back to the
+                                # previous batch behaviour rather than hanging.
                                 break
 
                 if terminated or not tool_calls:

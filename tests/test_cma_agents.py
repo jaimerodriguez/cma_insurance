@@ -392,3 +392,145 @@ def test_an_adjuster_session_mounts_only_its_own_store():
 
 def test_an_insurer_session_mounts_nothing():
     assert _session(Role.INSURER, "ins-1001", _CONFIG)._memory_resources() == []
+
+
+# --- the turn loop: not waiting out the socket timeout ----------------------
+#
+# Measured before the fix: 9 SSE stream requests in one run at 603-759 s each
+# (~100 min total) while the 39 tool calls inside it summed to 44 ms. On
+# `session.status_idle` with `requires_action` the loop kept reading a stream the
+# session had nothing more to send on, until httpx's 600 s default read timeout
+# (anthropic/_constants.py) killed the socket. These tests pin the exit condition.
+
+class _Ev(SimpleNamespace):
+    """A session event. `id` doubles as the blocking event id, as the API does."""
+
+
+def _idle(*blocked_on: str, stop: str = "requires_action"):
+    return _Ev(type="session.status_idle",
+               stop_reason=SimpleNamespace(type=stop, event_ids=list(blocked_on)))
+
+
+def _call(event_id: str, name: str = "list_incidents"):
+    return _Ev(type="agent.custom_tool_use", id=event_id, name=name, input={},
+               session_thread_id=None)
+
+
+class _Stream:
+    """Yields scripted events and records how many were consumed.
+
+    A real stream would block here rather than end, which is the whole bug: the
+    test asserts on `consumed`, not on reaching the end of the script.
+    """
+
+    def __init__(self, events): self.events, self.consumed = events, 0
+
+    def __enter__(self): return self
+
+    def __exit__(self, *exc): return False
+
+    def __iter__(self):
+        for e in self.events:
+            self.consumed += 1
+            yield e
+
+
+class _EventsAPI:
+    def __init__(self, legs): self.legs, self.streams, self.sent = list(legs), [], []
+
+    def stream(self, session_id, timeout=None, **kw):
+        self.timeout = timeout
+        s = _Stream(self.legs.pop(0) if self.legs else [])
+        self.streams.append(s)
+        return s
+
+    def send(self, session_id, events, **kw): self.sent.append(events)
+
+
+def _run_send(role, config, legs, monkeypatch):
+    """Drive CmaSession.send over scripted stream legs, with tools stubbed out."""
+    s = _session(role, "system", config)
+    api = _EventsAPI(legs)
+    s.client = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(events=api)))
+    s.session_id = "sesn_test"
+    monkeypatch.setattr(cma, "_dispatch", lambda table, name, args: '{"ok": true}')
+    text = s.send("go")
+    return s, api, text
+
+
+def test_stops_reading_once_it_holds_every_blocking_event(in_sync, monkeypatch):
+    """The exit condition is set-coverage of `stop_reason.event_ids`."""
+    _, api, _ = _run_send(Role.AGENT, in_sync[1], [
+        [_call("sevt_1"), _call("sevt_2"), _idle("sevt_1", "sevt_2"),
+         _Ev(type="never_reached")],
+        [_Ev(type="session.status_idle",
+             stop_reason=SimpleNamespace(type="end_turn", event_ids=[]))],
+    ], monkeypatch)
+    assert api.streams[0].consumed == 3, "kept reading past the idle it could answer"
+    assert len(api.sent) == 2                      # user.message, then the results
+    assert {e["custom_tool_use_id"] for e in api.sent[1]} == {"sevt_1", "sevt_2"}
+
+
+def test_idle_arriving_before_the_calls_it_names(in_sync, monkeypatch):
+    """The naive fix gets this wrong: coverage has to be re-checked as calls
+    arrive, not only when the idle does."""
+    _, api, _ = _run_send(Role.AGENT, in_sync[1], [
+        [_idle("sevt_1", "sevt_2"), _call("sevt_1"), _call("sevt_2"),
+         _Ev(type="never_reached")],
+        [_Ev(type="session.status_idle",
+             stop_reason=SimpleNamespace(type="end_turn", event_ids=[]))],
+    ], monkeypatch)
+    assert api.streams[0].consumed == 3
+
+
+def test_keeps_reading_when_blocked_on_something_it_has_not_seen(in_sync, monkeypatch):
+    """Answering a partial set would strand the session, so an uncovered id means
+    keep reading."""
+    _, api, _ = _run_send(Role.AGENT, in_sync[1], [
+        [_call("sevt_1"), _idle("sevt_1", "sevt_OTHER"), _call("sevt_2")],
+        [_Ev(type="session.status_idle",
+             stop_reason=SimpleNamespace(type="end_turn", event_ids=[]))],
+    ], monkeypatch)
+    assert api.streams[0].consumed == 3, "should have drained rather than answered early"
+
+
+def test_end_turn_idle_finishes_the_turn(in_sync, monkeypatch):
+    _, api, text = _run_send(Role.AGENT, in_sync[1], [
+        [_Ev(type="agent.message", content=[SimpleNamespace(type="text", text="done")]),
+         _Ev(type="session.status_idle",
+             stop_reason=SimpleNamespace(type="end_turn", event_ids=[])),
+         _Ev(type="never_reached")],
+    ], monkeypatch)
+    assert text == "done"
+    assert api.streams[0].consumed == 2
+    assert len(api.sent) == 1                      # only the user message
+
+
+def test_requires_action_without_event_ids_falls_back_to_batch(in_sync, monkeypatch):
+    """An API shape without `event_ids` must degrade to the old behaviour rather
+    than hang."""
+    _, api, _ = _run_send(Role.AGENT, in_sync[1], [
+        [_call("sevt_1"), _idle()],
+        [_Ev(type="session.status_idle",
+             stop_reason=SimpleNamespace(type="end_turn", event_ids=[]))],
+    ], monkeypatch)
+    assert {e["custom_tool_use_id"] for e in api.sent[1]} == {"sevt_1"}
+
+
+def test_terminated_session_ends_the_turn(in_sync, monkeypatch):
+    _, api, _ = _run_send(Role.AGENT, in_sync[1], [
+        [_call("sevt_1"), _Ev(type="session.status_terminated"),
+         _Ev(type="never_reached")],
+    ], monkeypatch)
+    assert api.streams[0].consumed == 2
+    assert len(api.sent) == 1                      # no results posted after termination
+
+
+def test_stream_is_opened_with_an_explicit_timeout(in_sync, monkeypatch):
+    """Backstop against any *other* silent stream: the SDK default is 600 s."""
+    _, api, _ = _run_send(Role.AGENT, in_sync[1], [
+        [_Ev(type="session.status_idle",
+             stop_reason=SimpleNamespace(type="end_turn", event_ids=[]))],
+    ], monkeypatch)
+    assert api.timeout == cma.STREAM_TIMEOUT_S
+    assert 0 < cma.STREAM_TIMEOUT_S < 600, "must be below the SDK default to help"

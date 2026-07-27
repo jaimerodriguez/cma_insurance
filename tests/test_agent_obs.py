@@ -778,3 +778,21 @@ def test_config_from_env_and_flag_precedence(monkeypatch, tmp_path):
     assert ObsConfig.from_env(redact="strict").redact == "strict"   # kwargs win
     monkeypatch.setenv("OBS_REDACT", "bogus")
     assert ObsConfig.from_env().redact == "flow"                    # invalid -> default
+
+
+def test_disconnected_stream_is_still_timed(tmp_path, upstream):
+    """A client that hangs up on an SSE stream once it has what it needs is the
+    normal case, not an anomaly — so those rows must carry `duration_ms` too, or
+    the requests most worth timing are the ones with no timing."""
+    cfg = ObsConfig(var_dir=tmp_path, wire=True, upstream=upstream,
+                    wire_responses="summary")
+    with Observability.start(cfg, front_end="t") as obs:
+        body = json.dumps({"stream": True}).encode()
+        req = urllib.request.Request(obs.base_url + "/v1/messages", data=body,
+                                     headers={"Content-Type": "application/json"})
+        resp = urllib.request.urlopen(req)
+        resp.read(1)          # take one byte, then hang up mid-stream
+        resp.close()
+        wire = obs.paths()["wire"]
+    row = _rows(wire)[0]
+    assert isinstance(row.get("duration_ms"), int)

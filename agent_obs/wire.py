@@ -247,9 +247,14 @@ class CaptureProxy:
                         proxy._record(row)
 
                 except (BrokenPipeError, ConnectionResetError):
-                    # Client went away mid-stream (an interrupt). Still record.
+                    # Client went away mid-stream. Still record — and time it, the
+                    # same as a completed request. A client that deliberately hangs
+                    # up on an SSE stream (the normal case once it has what it
+                    # needs) lands here, so omitting `duration_ms` made exactly the
+                    # requests worth timing the ones with no timing.
                     if row is not None:
                         row["status"] = status
+                        row["duration_ms"] = int((time.monotonic() - started) * 1000)
                         row["client_disconnected"] = True
                         proxy._record(row)
                 except Exception as exc:
