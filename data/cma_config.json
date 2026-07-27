@@ -1,0 +1,13 @@
+{
+  "environment_id": "env_011pTebKjPq8Q3gK2mmB3FXv",
+  "agents": {
+    "adjuster": "agent_01HukpraYTpY2LPYCrU68xzD",
+    "insurer": "agent_017iZrnoz4uYnbEq9yvAbqB9",
+    "agent": "agent_01WQQnpYzSbrj353gejoxb1D"
+  },
+  "memory_stores": {
+    "jaime": "memstore_01PXjQLW5o5eHgsfFHLae4dx",
+    "sam": "memstore_017GwiRD7F4NhZLQ3HX7deWA",
+    "jane": "memstore_01FvmDjoBfJLgdonQPP7aSWH"
+  }
+}
