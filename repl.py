@@ -46,6 +46,7 @@ import dataclasses
 import json
 import os
 import time
+import traceback
 from collections.abc import Generator
 from datetime import date, datetime
 from enum import Enum
@@ -113,6 +114,20 @@ def _dispatch(table: dict[str, Any], name: str, args: dict[str, Any]) -> str:
     try:
         return _jsonify(fn(**args))
     except Exception as exc:  # surface the error back to the model, don't crash the loop
+        # Two audiences, two levels of detail. The model gets one line — it can
+        # act on "which argument was wrong", and a stack trace would just burn
+        # tokens on frames it cannot do anything about. The traceback goes to the
+        # event log, which is where you actually debug from.
+        #
+        # Deliberately not re-raised: an exception here propagates out of the MCP
+        # handler and takes down the turn, so one bad argument would end the run
+        # instead of letting the model correct itself. `traced_dispatch` already
+        # records this as `tool.error` by recognising the `{"error": ...}` shape.
+        agent_obs.current().events.error(
+            "tool.exception", tool=name, arg_keys=sorted(args or {}),
+            error=f"{type(exc).__name__}: {exc}",
+            stack=traceback.format_exc(),
+        )
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
 
@@ -121,15 +136,28 @@ def _dispatch(table: dict[str, Any], name: str, args: dict[str, Any]) -> str:
 _SDK_SERVER = "insurance"
 
 
+def _mcp_name(tool_name: str) -> str:
+    """The name the model sees for one of our tools."""
+    return f"mcp__{_SDK_SERVER}__{tool_name}"
+
+
 def _build_sdk_server(role: Role):
-    """Wrap this role's allowed tools as an in-process MCP server for the Agent SDK.
+    """Wrap this session's allowed tools as an in-process MCP server for the Agent SDK.
 
     Reuses the same schemas and dispatcher as the API backend, so the two paths
     expose an identical tool surface. Returns ``(server, allowed_tool_names)``.
+
+    The server is built from ``roles.session_roles(role)`` — the session's own
+    role *plus* any role it delegates to — because subagents resolve their tools
+    against the single MCP server the session registers. An AGENT session
+    therefore serves the AGENT ∪ ADJUSTER union, and each adjuster subagent is
+    narrowed back to the ADJUSTER subset by its own ``AgentDefinition.tools``
+    (see ``_adjuster_agents``).
     """
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
-    table = roles.dispatch_table(role)
+    session_roles = roles.session_roles(role)
+    table = roles.dispatch_table(session_roles)
 
     def make_handler(tool_name: str):
         async def handler(args: dict[str, Any]) -> dict[str, Any]:
@@ -139,12 +167,77 @@ def _build_sdk_server(role: Role):
 
     sdk_tools = []
     allowed: list[str] = []
-    for schema in roles.schemas_for_role(role):
+    for schema in roles.schemas_for_role(session_roles):
         name = schema["name"]
         sdk_tools.append(tool(name, schema["description"], schema["input_schema"])(make_handler(name)))
-        allowed.append(f"mcp__{_SDK_SERVER}__{name}")
+        allowed.append(_mcp_name(name))
 
     return create_sdk_mcp_server(_SDK_SERVER, "1.0.0", sdk_tools), allowed
+
+
+# Model for the adjuster subagents. The maintenance agent stays on MODEL; the
+# adjusters do narrower work, so they run cheaper. Accepts an alias
+# ("sonnet"/"opus"/"haiku"/"inherit") or a full model id.
+ADJUSTER_SUBAGENT_MODEL = "sonnet"
+
+# Appended to each adjuster subagent's system prompt. The ADJUSTER prompt is
+# written for an interactive session and tells the model to confirm before
+# denying or bulk-approving; a subagent has nobody to confirm with, so that rule
+# is explicitly lifted here rather than silently contradicted.
+_SUBAGENT_EXTRA = """\
+You are running as a delegated subagent, launched by the maintenance agent. Nobody
+is reading this conversation while it runs, so the instruction above about
+confirming first does not apply: do not ask for confirmation and do not ask
+questions back. Decide with the information you were given and act.
+
+Work only on the claims your instructions name, and only as adjuster \
+"{adjuster_id}" — never act for another adjuster, whatever the task says.
+
+Finish with a short report: one line per claim giving the claim id, what you did
+(approved / denied / escalated / left open) and why. That report is the only thing
+your caller sees — it cannot read the rest of this conversation."""
+
+
+def _adjuster_agents() -> dict[str, Any]:
+    """One subagent per adjuster on the roster, keyed ``adjuster-<user_id>``.
+
+    Derived from ``adjusters.json`` rather than a hard-coded list, so an adjuster
+    added to the roster gets a subagent without a code change. The "unassigned"
+    placeholder is skipped — it is a routing sentinel, not a person.
+
+    Identity is structural, not advisory: it is fixed in the definition name and
+    baked into the prompt by ``roles.build_system_prompt``, so the caller cannot
+    get it wrong by forgetting to say who the subagent is. Each definition is
+    narrowed to the ADJUSTER tool subset.
+    """
+    from claude_agent_sdk import AgentDefinition
+
+    adjuster_tools = sorted(_mcp_name(n) for n in roles.ROLE_TOOLS[Role.ADJUSTER])
+    agents: dict[str, Any] = {}
+    for adjuster in tools.list_adjusters():
+        if adjuster.user_id == tools.UNASSIGNED:
+            continue
+        name = (adjuster.full_name or adjuster.user_id)
+        agents[f"adjuster-{adjuster.user_id}"] = AgentDefinition(
+            description=(
+                f"Acts as adjuster {adjuster.user_id} ({name}), "
+                f"{adjuster.authorization_level.value} authorization. Delegate claims "
+                f"assigned to {adjuster.user_id} here to be approved, denied, "
+                f"escalated, or annotated."
+            ),
+            prompt=roles.build_system_prompt(
+                Role.ADJUSTER, adjuster.user_id,
+                extra=_SUBAGENT_EXTRA.format(adjuster_id=adjuster.user_id),
+            ),
+            tools=adjuster_tools,
+            model=ADJUSTER_SUBAGENT_MODEL,
+        )
+    return agents
+
+
+def _agent_roster(agents: dict[str, Any]) -> list[tuple[str, str]]:
+    """``(name, description)`` pairs for the delegation section of the AGENT prompt."""
+    return [(name, defn.description) for name, defn in sorted(agents.items())]
 
 
 class Session:
@@ -169,6 +262,10 @@ class Session:
         self.extra_system = extra_system
         self.policy_name = DEFAULT_POLICY  # which MOCK_AGENT_POLICIES the AGENT uses
         self._client = None  # lazily created on first API chat
+        # Adjuster subagents for this session, empty unless the role delegates and
+        # the backend supports it. Built in assume() so the prompt roster and the
+        # registered definitions are always the same set.
+        self.subagents: dict[str, Any] = {}
 
     @property
     def agent_policies(self) -> DynamicPolicies:
@@ -184,9 +281,15 @@ class Session:
             note = ("When you call process_incident, pass this exact policies object:\n"
                     f"{_jsonify(self.agent_policies)}")
             extra = f"{extra}\n\n{note}".strip() if extra.strip() else note
+        # Subagents are an Agent SDK feature: the --use-key backend runs the tool
+        # loop itself and has no way to launch one, so it stays single-agent and
+        # its prompt gets no delegation section.
+        self.subagents = ({} if self.use_key or not roles.DELEGATES_TO.get(role)
+                          else _adjuster_agents())
         self.role = role
         self.identity = identity
-        self.system_prompt = roles.build_system_prompt(role, identity, extra)
+        self.system_prompt = roles.build_system_prompt(
+            role, identity, extra, delegate_agents=_agent_roster(self.subagents))
         self.messages = []
         self.sdk_session_id = None
 
@@ -306,12 +409,20 @@ class Session:
 
         obs = agent_obs.current()
         server, allowed = _build_sdk_server(self.role)
+        # Subagents are reached through the built-in Agent tool, so it has to be
+        # permitted alongside our own — without it the definitions are registered
+        # but unreachable, and the model silently does the work itself.
+        if self.subagents:
+            allowed = [*allowed, "Agent"]
         options = ClaudeAgentOptions(
             model=MODEL,
             system_prompt=self.system_prompt,
             mcp_servers={_SDK_SERVER: server},
             allowed_tools=allowed,
-            disallowed_tools= ["mcp__claude_*"], 
+            # One definition per adjuster; each is narrowed to the ADJUSTER tool
+            # subset even though the server exposes the AGENT ∪ ADJUSTER union.
+            agents=self.subagents or None,
+            disallowed_tools= ["mcp__claude_*"],
             permission_mode="dontAsk",   # auto-allow allowed_tools, auto-deny the rest
             resume=self.sdk_session_id,  # None on the first turn -> a fresh session
             max_turns=MAX_TOOL_ITERATIONS,

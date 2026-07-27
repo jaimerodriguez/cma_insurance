@@ -23,6 +23,19 @@
                 "--obs-wire-tools", "names", 
                 "--obs-wire-tools-keep",  "mcp__insurance__*"  
             ]
+        },
+        {
+            "name": "CMA",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "cma.py",
+            "console": "integratedTerminal", 
+            "args": [
+                "--wire" , 
+                "--obs-redact" , "none" , 
+                "--obs-wire-tools", "names", 
+                "--obs-wire-tools-keep",  "mcp__insurance__*"  
+            ]
         },         
     ]
 }

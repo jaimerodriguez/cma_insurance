@@ -9,8 +9,11 @@ forwards the request upstream verbatim.
 Generalised from the single-purpose version it was adapted from:
 
 * **Any path, not just ``/v1/messages``.** ``wire_paths`` is a list of substrings,
-  which is what lets it cover Managed Agents traffic (``/v1/beta/sessions/...``)
-  as well as the Messages API.
+  which is what lets it cover the Managed Agents control plane (``/v1/agents``,
+  ``/v1/sessions``, ``/v1/environments``, ``/v1/memory_stores``, …) as well as the
+  Messages API. Note those are plain ``/v1/<resource>`` paths — the beta is a
+  ``?beta=true`` query parameter plus a header, not a ``/v1/beta/`` prefix — so a
+  path list that does not name them captures nothing on the ``cma.py`` front-end.
 * **Responses too**, at three levels (``none``/``summary``/``full``). The original
   captured requests only, so you could see the cache breakpoints you sent but not
   what came back. SSE streams are summarised by event-type counts rather than

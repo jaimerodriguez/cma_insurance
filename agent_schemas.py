@@ -88,14 +88,43 @@ def _is_special(tp: object) -> bool:
     return (isinstance(tp, type) and issubclass(tp, Enum)) or is_dataclass(tp)
 
 
+def _as_nullable(schema: dict) -> dict:
+    """Widen a schema so it also accepts ``null``.
+
+    A parameter annotated ``X | None`` genuinely accepts ``None``, and the model
+    is routinely handed defaults that contain one — the ADJUSTER prompt embeds
+    the policies object verbatim, ``agent_override_autoapprove_reason: null``
+    included, and tells the model to pass it through. Emitting the non-null
+    schema made the MCP server reject those calls with
+    ``Input validation error: None is not of type 'string'`` *before* the tool
+    ran, so the failure never reached ``_dispatch`` and could not be caught
+    there. The schema has to match the signature.
+    """
+    out = dict(schema)
+    kind = out.get("type")
+    if isinstance(kind, str):
+        if kind != "null":
+            out["type"] = [kind, "null"]
+    elif isinstance(kind, list) and "null" not in kind:
+        out["type"] = [*kind, "null"]
+    # An enum constrains values independently of `type`, so a nullable enum has
+    # to list None too or null stays rejected.
+    if isinstance(out.get("enum"), list) and None not in out["enum"]:
+        out["enum"] = [*out["enum"], None]
+    return out
+
+
 def _type_to_schema(tp: object, description: str = "") -> dict:
     """Map a Python type annotation to a JSON-schema fragment."""
     origin = typing.get_origin(tp)
     if origin is types.UnionType or origin is typing.Union:
-        # Optional[...] / A | B — drop None, prefer an enum/dataclass member.
-        args = [a for a in typing.get_args(tp) if a is not type(None)]
+        # Optional[...] / A | B — prefer an enum/dataclass member, and keep the
+        # nullability rather than dropping it (see ``_as_nullable``).
+        all_args = typing.get_args(tp)
+        args = [a for a in all_args if a is not type(None)]
         chosen = next((a for a in args if _is_special(a)), args[0] if args else str)
-        return _type_to_schema(chosen, description)
+        schema = _type_to_schema(chosen, description)
+        return _as_nullable(schema) if len(args) != len(all_args) else schema
 
     schema: dict = {}
     if isinstance(tp, type) and issubclass(tp, IntFlag):

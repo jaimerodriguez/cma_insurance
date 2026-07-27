@@ -77,9 +77,28 @@ class ObsConfig:
     wire: bool = False           # local capture proxy — off unless asked for
 
     # --- wire proxy ------------------------------------------------------
-    # Request paths to record. Substring match, so "/v1/messages" covers the
-    # Messages API and "/v1/beta/sessions" covers Managed Agents session traffic.
-    wire_paths: tuple[str, ...] = ("/v1/messages", "/v1/beta")
+    # Request paths to record. Substring match, so "/v1/messages" also covers
+    # "/v1/messages?beta=true".
+    #
+    # Managed Agents resources are plain "/v1/<resource>" paths — the beta is
+    # signalled by a `?beta=true` query parameter and the `anthropic-beta`
+    # header, *not* by a "/v1/beta/" path prefix. An earlier default assumed the
+    # prefix and so matched nothing on the `cma.py` front-end: the proxy started,
+    # forwarded every request correctly, and recorded none of them, leaving no
+    # wire file at all. Each resource is listed explicitly rather than globbing
+    # "/v1/" so that credential endpoints (e.g. "/v1/oauth/token", which carries
+    # refresh tokens and client secrets) are never captured.
+    wire_paths: tuple[str, ...] = (
+        "/v1/messages",          # Messages API — repl.py, both backends
+        "/v1/agents",            # ── Managed Agents control plane (cma.py)
+        "/v1/environments",
+        "/v1/sessions",          #    includes /v1/sessions/{id}/events[/stream]
+        "/v1/memory_stores",
+        "/v1/vaults",
+        "/v1/deployments",
+        "/v1/skills",
+        "/v1/files",
+    )
     wire_responses: str = "summary"
     # Tool-definition shaping. `full` by default: shaping is lossy in a way
     # redaction is not, so it is opt-in and a shaped row is stamped `_shaped`.

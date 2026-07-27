@@ -213,7 +213,10 @@
           "description": "The incident/case id to triage (e.g. \"case-3001\")."
         },
         "policies": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
           "properties": {
             "auto_approve": {
               "type": "integer",
@@ -236,7 +239,10 @@
               "description": "When True, force auto-approval."
             },
             "agent_override_autoapprove_reason": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Why the agent forced approval."
             },
             "can_assign": {
@@ -281,7 +287,10 @@
           "description": "The incident/case id to escalate (e.g. \"case-3004\")."
         },
         "policies": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
           "properties": {
             "auto_approve": {
               "type": "integer",
@@ -304,7 +313,10 @@
               "description": "When True, force auto-approval."
             },
             "agent_override_autoapprove_reason": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Why the agent forced approval."
             },
             "can_assign": {
@@ -382,7 +394,10 @@
           "description": "The new ``Resolution`` (or its string value, e.g. \"approved\", \"management_override\")."
         },
         "reason": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Optional free-text explanation, stored on the incident and noted in its history."
         }
       },
@@ -587,7 +602,10 @@
           "description": "The incident/case id to update (e.g. \"case-3001\")."
         },
         "value": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "The new full history text, or ``None`` to clear it."
         }
       },
@@ -609,7 +627,10 @@
           "description": "The adjuster's id (e.g. \"jaime\")."
         },
         "value": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "The new full history text, or ``None`` to clear it."
         }
       },
@@ -631,7 +652,10 @@
           "description": "The insurer's id (e.g. \"ins-1001\")."
         },
         "value": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "The new full history text, or ``None`` to clear it."
         }
       },
@@ -697,7 +721,10 @@
           "description": "The adjuster's id (e.g. \"jaime\")."
         },
         "value": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "The new full preferences text, or ``None`` to clear it."
         }
       },
@@ -719,7 +746,10 @@
           "description": "The insurer's id (e.g. \"ins-1001\")."
         },
         "value": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "The new full preferences text, or ``None`` to clear it."
         }
       },

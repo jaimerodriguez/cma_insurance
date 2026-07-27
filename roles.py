@@ -21,6 +21,7 @@ The tool allow-lists below reference functions by name from
 """
 
 import json
+from collections.abc import Iterable, Sequence
 from enum import Enum
 from typing import Any, Callable
 
@@ -68,25 +69,58 @@ ROLE_TOOLS: dict[Role, set[str]] = {
 }
 
 
-def tools_for_role(role: Role) -> list[Callable[..., Any]]:
-    """Return the ``AGENT_TOOLS`` functions this role may call."""
-    allowed = ROLE_TOOLS[role]
+# Roles a session must *also* serve because it can delegate to subagents of that
+# role. Only the Claude Agent SDK backend can delegate; the direct-API and
+# Managed Agents paths ignore this and stay single-role.
+#
+# The consequence is worth stating plainly: an AGENT session's tool surface is
+# the union of AGENT and ADJUSTER, because a subagent's tools are resolved
+# against the one MCP server the session registers. Which tools each *agent*
+# within that session may call is then narrowed per-agent — see
+# ``repl._adjuster_agents``. That moves part of the enforcement from "the
+# function is not in the dispatch table" to "the tool is not on this agent's
+# allow-list"; ``_dispatch`` still refuses anything outside the table.
+DELEGATES_TO: dict[Role, tuple[Role, ...]] = {
+    Role.AGENT: (Role.ADJUSTER,),
+}
+
+# A role, or several — every tool lookup below accepts either.
+RoleSpec = Role | Iterable[Role]
+
+
+def session_roles(role: Role) -> tuple[Role, ...]:
+    """The role itself plus any role it can delegate to (see ``DELEGATES_TO``)."""
+    return (role, *DELEGATES_TO.get(role, ()))
+
+
+def allowed_tool_names(spec: RoleSpec) -> set[str]:
+    """Union of the tool names the given role (or roles) may call."""
+    if isinstance(spec, Role):
+        return set(ROLE_TOOLS[spec])
+    return {name for role in spec for name in ROLE_TOOLS[role]}
+
+
+def tools_for_role(spec: RoleSpec) -> list[Callable[..., Any]]:
+    """Return the ``AGENT_TOOLS`` functions this role (or roles) may call."""
+    allowed = allowed_tool_names(spec)
     return [fn for fn in tools.AGENT_TOOLS if fn.__name__ in allowed]
 
 
-def schemas_for_role(role: Role) -> list[dict]:
-    """Return the Anthropic tool schemas for the tools this role may call."""
-    allowed = ROLE_TOOLS[role]
+def schemas_for_role(spec: RoleSpec) -> list[dict]:
+    """Return the Anthropic tool schemas for the tools this role (or roles) may call."""
+    allowed = allowed_tool_names(spec)
     return [s for s in agent_schemas.build_tool_schemas() if s["name"] in allowed]
 
 
-def dispatch_table(role: Role) -> dict[str, Callable[..., Any]]:
-    """Return a name -> function map restricted to this role's allowed tools.
+def dispatch_table(spec: RoleSpec) -> dict[str, Callable[..., Any]]:
+    """Return a name -> function map restricted to the allowed tools.
 
     A tool call for a name not in the table must be refused — this is the
-    enforcement point that mirrors the schema filtering.
+    enforcement point that mirrors the schema filtering. Passing several roles
+    widens the table to their union, which is what a session that delegates to
+    subagents needs (see ``session_roles``).
     """
-    return {fn.__name__: fn for fn in tools_for_role(role)}
+    return {fn.__name__: fn for fn in tools_for_role(spec)}
 
 
 # --- system prompts ---------------------------------------------------------
@@ -104,7 +138,7 @@ You can ONLY take adjuster actions, and only for this adjuster. Use the tools to
 - log history and notes on incidents, insurers, and this adjuster.
 
 Auto-approval policies for this adjuster (from agent memory) are:
-{policies_json}
+{policies_json}.  
 When you call process_incident or escalate_incident, pass this exact object as the
 `policies` argument so the correct ceilings and any agent override apply.
 {notes}
@@ -127,8 +161,8 @@ Your goal is to do two things for this policyholder:
 2. Answer questions about the status of THIS policyholder's claims (use
    list_incidents_for_insurer / get_incident_details).
 
-You should be helpful, for example, if they don't know their policy and need you to look it up, its OK. 
-If they want to file a claim and only have one policy, use that as the default. Just confirm it. 
+You should be helpful, for example, if they don't know their policy, look it up for them. 
+If they want to file a claim and only have one policy, use that as the policy_id. Just confirm it before you use it. 
 
 Do not get creative asking for police reports or similar tasks. Stay factual. 
 If the insurer sounds frustrated, note it down in both the created Incident's history and the Insurer's history.  
@@ -166,14 +200,48 @@ Your tasks each run:
 
 Report concisely what you routed, triaged, and closed."""
 
+# Appended to the AGENT prompt only when the backend actually registered adjuster
+# subagents (the Agent SDK path). Kept out of _AGENT_PROMPT so the direct-API and
+# Managed Agents paths are never told to delegate to subagents they do not have.
+_AGENT_DELEGATION = """\
+## Delegating to adjuster subagents
 
-def build_system_prompt(role: Role, identity_id: str, extra: str = "") -> str:
+You have one subagent per adjuster, launched with the Agent tool:
+
+{roster}
+
+Your job is to triage, autoapprove, and route (or assign to adjusters). 
+Once a claim has an adjuster, the *decision* is
+that adjuster's — delegate it rather than resolving it yourself.  
+After you are done triaging and routing to adjusters, 
+invoke each adjuster via their own subagent in a single task, not one task per claim,
+and give it the claim ids plus anything you learned that they might not infer directly from the claim. 
+ 
+Delegate for: approving, denying, escalating to management, notifying, and logging
+notes on a claim that has an assigned adjuster.
+
+Do NOT delegate for: routing and assignment (yours), close_stale_resolved (yours),
+or a claim that is already resolved. Never send a claim to an adjuster other than
+the one it is assigned to.
+
+Launch the subagents you need in a single message, but don't run adjusters concurrently; run them sequentially.  
+Thencollect their reports and fold them into your own summary — say what each adjuster
+decided, not just that you delegated."""
+
+
+def build_system_prompt(role: Role, identity_id: str, extra: str = "",
+                        delegate_agents: Sequence[tuple[str, str]] = ()) -> str:
     """Build the seed system prompt for a role + identity.
 
     Args:
         role: The active role.
         identity_id: The adjuster user_id or insurer id assumed for the session.
         extra: Extra instructions to append (e.g. tone) — supplied by the caller.
+        delegate_agents: ``(agent_name, one_line_description)`` pairs for the
+            subagents this session actually registered. Only the AGENT prompt
+            uses them, and only when non-empty — a backend with no subagents
+            must not be told to delegate to agents that do not exist, so the
+            caller passes these rather than the prompt assuming them.
 
     Returns:
         The system prompt string.
@@ -196,6 +264,9 @@ def build_system_prompt(role: Role, identity_id: str, extra: str = "") -> str:
         )
     else:
         prompt = _AGENT_PROMPT
+        if delegate_agents:
+            roster = "\n".join(f"- {name} — {desc}" for name, desc in delegate_agents)
+            prompt = f"{prompt}\n\n{_AGENT_DELEGATION.format(roster=roster)}"
 
     return f"{prompt}\n\n{extra.strip()}" if extra.strip() else prompt
 

@@ -154,7 +154,35 @@ dispatch table, so a persona can never call a tool it isn't granted.
   adjuster `unassigned`.
 - **AGENT** — the unattended maintenance persona. Routes unassigned incidents to
   authorization-appropriate adjusters, triages them via `process_incident`, and closes
-  stale resolved claims.
+  stale resolved claims. On the Agent SDK backend it then **delegates the decisions
+  to adjuster subagents** (below) rather than making them itself.
+
+### Adjuster subagents (Agent SDK backend only)
+
+An AGENT session registers one subagent per adjuster on the roster —
+`adjuster-jaime`, `adjuster-sam`, `adjuster-jane` — via
+`ClaudeAgentOptions.agents`. The maintenance agent triages and routes, hands each
+adjuster's claims to their own subagent with the Agent tool, and folds the reports
+back into its summary. Definitions are generated in `repl._adjuster_agents()` from
+`adjusters.json`, so a new adjuster gets a subagent with no code change.
+
+Identity is structural rather than advisory: it is fixed in the definition name and
+baked into the prompt by `roles.build_system_prompt(Role.ADJUSTER, user_id)` — the
+same prompt the interactive `/adjuster` persona uses, plus an override lifting the
+"confirm first" rule (a subagent has nobody to confirm with) and pinning it to its
+own adjuster id. The caller cannot get the identity wrong by forgetting to state it.
+
+**One tradeoff to know.** Subagents resolve tools against the single MCP server the
+session registers, so an AGENT session now serves the **AGENT ∪ ADJUSTER union**
+(25 tools, `roles.session_roles`) instead of AGENT alone. Each subagent is narrowed
+back to the 21 ADJUSTER tools by its `AgentDefinition.tools`. Part of the
+enforcement therefore moves from *"the function is not in the dispatch table"* to
+*"the tool is not on this agent's allow-list"* — `_dispatch` still refuses anything
+outside the table, but the table is now wider than the parent role alone.
+
+The `--use-key` backend runs the tool loop itself and cannot launch subagents, so it
+stays single-agent and its prompt gets no delegation section; `cma.py` has its own
+coordinator mechanism and is unaffected.
 
 ---
 
@@ -252,6 +280,16 @@ The LLM personas work in **both** modes — `--use-key` only selects the backend
 
 Either way the role's allowed tools and system prompt come from `roles.py`, and the
 deterministic commands (`/agent`, `/agent-run`) work with no LLM at all.
+
+**`cma.py` always loads `.env`.** Managed Agents is API-only — there is no
+subscription path like the CLI's — so it reads `ANTHROPIC_API_KEY` on every run
+rather than behind a flag, and prints which credential it resolved at startup.
+An exported `ANTHROPIC_API_KEY` still beats `.env` (`load_dotenv` does not
+override), and with no key anywhere it falls through to an `ant auth login`
+profile. A value that isn't a `sk-ant-…` key is rejected up front with a clear
+message: an API key **outranks** a profile in the SDK's resolution order, so a
+leftover placeholder does not quietly fall back to a working profile — it goes
+out on the wire and returns a 401.
 
 Assume a persona, then chat. In default mode the SDK exposes our role-restricted tools
 as in-process MCP tools (`mcp__insurance__<fn>`) and gates them with

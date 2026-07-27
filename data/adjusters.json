@@ -16,7 +16,7 @@
     "timezone": "America/Los_Angeles",
     "full_name": "Sam Chenaur",
     "preferences": "Prefers email over phone. Reachable 9am-3pm only.",
-    "history": "7/1/2026 - covering caseload for a colleague on leave.",
+    "history": "7/1/2026 - covering caseload for a colleague on leave.\n7/25/2026 - notified: incident f2732a38-940c-4f1c-8aa5-6934a40b01ad resolution is now denied\n7/25/2026 - notified: incident 47667f65-b7f8-4dda-84ee-ccd076bfcf5b resolution is now approved\n7/25/2026 - notified: incident 62ea91c4-1714-49e0-99f1-e72534502200 resolution is now denied\n7/25/2026 - notified: incident 767bb224-add6-4d30-aa14-d2abf404e33f resolution is now approved\n7/25/2026 - notified: incident 8af5efcc-afae-496b-90f2-98c4be1932ad resolution is now approved\n7/25/2026 - notified: incident a1a5a543-56fb-4e05-b8ef-770619101971 resolution is now denied",
     "authorization_level": "medium"
   },
   "jane": {
@@ -26,7 +26,7 @@
     "timezone": "America/Boise",
     "full_name": "Jane Austin",
     "preferences": "Fine to share direct line with policyholders.",
-    "history": "5/15/2026 - recognized for fast claim turnaround.\n7/25/2026 - notified: incident a3f0100c-5853-4c38-a20e-a6ee12bd57ee resolution is now approved",
+    "history": "5/15/2026 - recognized for fast claim turnaround.\n7/25/2026 - notified: incident a3f0100c-5853-4c38-a20e-a6ee12bd57ee resolution is now approved\n7/25/2026 - notified: incident 44b5cd3e-845d-4839-9da9-b0a443509d44 resolution is now approved\n7/25/2026 - notified: incident 3fbb5978-9b7f-48ed-a95b-9180f30c4387 resolution is now approved\n7/25/2026 - notified: incident ddd3b4f4-6edc-4597-a431-76009b1ab065 resolution is now denied\n7/25/2026 - notified: incident 3e31e201-5207-4fb4-83df-b1d17527a549 resolution is now denied\n7/25/2026 - notified: incident b235f246-fbe5-49bf-a3d6-61b87dc8e5da resolution is now denied\n7/25/2026 - notified: incident b13be8ce-be13-44c3-9d1c-ee14a7ba81e9 resolution is now management_override\n7/25/2026 - notified: incident 488a99ae-27e2-4ddf-a509-b6a575d7e932 resolution is now management_override\n7/25/2026 - notified: incident a4aa9fc4-fa0e-42dd-9b79-7df39b4904e0 resolution is now management_override\n7/25/2026 - notified: incident ddf89aab-cdd1-4d30-a115-1bed6d4b0efa resolution is now approved\n7/25/2026 - notified: incident 9da09ced-de39-43db-b87c-639f96db0853 resolution is now denied\n7/25/2026 - notified: incident a8e306e3-c480-41c4-b4b5-43d7d3f54ee2 resolution is now approved\n7/25/2026 - notified: incident e46f398a-6b6f-47da-8d3e-eea02458e6dd resolution is now approved\n7/25/2026 - notified: incident 14cd43f8-2e2a-45c3-8273-47be555a090f resolution is now denied",
     "authorization_level": "high"
   },
   "unassigned": {

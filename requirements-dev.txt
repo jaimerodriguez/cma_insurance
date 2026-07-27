@@ -3,4 +3,8 @@
 # Install with:  pip install -r requirements-dev.txt
 -r requirements.txt
 PyYAML>=6.0.3
-pytest>=8.0            # tests/ — agent_obs and triage-path unit tests
+pytest>=8.0            # tests/ — agent_obs, triage-path, and tool-schema unit tests
+# Validates generated tool schemas against the payloads the model actually sends,
+# using the same validator the MCP server applies at call time. Already present
+# transitively via `mcp`; pinned here so the schema tests do not depend on that.
+jsonschema>=4.20

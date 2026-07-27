@@ -522,14 +522,61 @@ def test_proxy_only_captures_configured_paths(tmp_path, upstream):
     assert [r["path"] for r in rows] == ["/v1/messages"]
 
 
-def test_proxy_captures_managed_agents_paths(tmp_path, upstream):
-    """The Managed Agents front-end talks to /v1/beta/sessions/... — the default
-    path list has to cover it, or cma.py gets no wire log."""
+# The literal paths the Managed Agents SDK requests. The beta is a `?beta=true`
+# query parameter and an `anthropic-beta` header — there is no "/v1/beta/" prefix.
+# An earlier version of this test asserted "/v1/beta/sessions/sess_1/events", a
+# path the SDK never sends: it encoded the same wrong assumption as the default
+# `wire_paths` and so passed while `cma.py --wire` silently captured nothing.
+CMA_REQUEST_PATHS = [
+    "/v1/agents?beta=true",
+    "/v1/environments?beta=true",
+    "/v1/sessions?beta=true",
+    "/v1/sessions/sesn_1/events?beta=true",
+    "/v1/memory_stores?beta=true",
+]
+
+
+@pytest.mark.parametrize("path", CMA_REQUEST_PATHS)
+def test_proxy_captures_managed_agents_paths(tmp_path, upstream, path):
+    """cma.py's whole control plane has to land in the wire log, or `--wire` is a
+    no-op on that front-end — the proxy still forwards, so nothing looks broken."""
     cfg = ObsConfig(var_dir=tmp_path, wire=True, upstream=upstream)
     with Observability.start(cfg, front_end="t") as obs:
-        _post(obs.base_url + "/v1/beta/sessions/sess_1/events", {"a": 1})
+        _post(obs.base_url + path, {"a": 1})
         wire = obs.paths()["wire"]
-    assert _rows(wire)[0]["path"] == "/v1/beta/sessions/sess_1/events"
+    assert _rows(wire)[0]["path"] == path
+
+
+def test_default_wire_paths_cover_what_the_installed_sdk_requests():
+    """Derived from the installed `anthropic` package rather than hard-coded, so
+    a new Managed Agents resource fails here instead of going uncaptured."""
+    import re
+    from pathlib import Path
+
+    import anthropic
+
+    resources = Path(anthropic.__file__).parent / "resources" / "beta"
+    found = set()
+    for py in resources.rglob("*.py"):
+        found.update(re.findall(r'"(/v1/[a-z_]+)', py.read_text(encoding="utf-8")))
+
+    # Scope to the resources cma.py actually drives; admin/other betas are not
+    # this front-end's traffic and are deliberately not captured by default.
+    relevant = {p for p in found if p.split("/")[2] in {
+        "agents", "sessions", "environments", "memory_stores", "messages"}}
+    assert relevant, "path scrape found nothing — SDK layout changed, fix the scrape"
+
+    defaults = ObsConfig().wire_paths
+    uncovered = {p for p in relevant if not any(d in p for d in defaults)}
+    assert not uncovered, f"default wire_paths would not capture: {sorted(uncovered)}"
+
+
+def test_credential_endpoints_are_not_captured_by_default():
+    """`/v1/oauth/token` carries refresh tokens and client secrets. The default is
+    an explicit resource list rather than a "/v1/" glob precisely so that
+    broadening coverage cannot sweep it in."""
+    defaults = ObsConfig().wire_paths
+    assert not any(d in "/v1/oauth/token" for d in defaults)
 
 
 def test_proxy_summarizes_sse_without_storing_the_stream(tmp_path, upstream):
