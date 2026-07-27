@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 import cma
+import mcp_server
 from roles import Role
 
 
@@ -58,6 +59,10 @@ def _live_agent(role: Role, *, agent_id: str = "agent_live", version: int = 1,
             type="coordinator",
             agents=[SimpleNamespace(type="agent", id=i, version=1) for i in ids])
             if ids else None),
+        # Echoed back as models, not the dicts we sent — and empty in the default
+        # custom-tool mode, which is what `_desired_agent` will also produce.
+        mcp_servers=[SimpleNamespace(type="url", name=s["name"], url=s["url"])
+                     for s in desired["mcp_servers"]],
     )
 
 
@@ -534,3 +539,77 @@ def test_stream_is_opened_with_an_explicit_timeout(in_sync, monkeypatch):
     ], monkeypatch)
     assert api.timeout == cma.STREAM_TIMEOUT_S
     assert 0 < cma.STREAM_TIMEOUT_S < 600, "must be below the SDK default to help"
+
+
+# --- MCP transport wiring ---------------------------------------------------
+#
+# The switch is `cma.MCP.active`. Off, everything below must behave exactly as it
+# did — that is what keeps the existing app working.
+
+ON = mcp_server.McpConfig(public_url="https://x.example.com", token="tok")
+
+
+def test_custom_tools_are_the_default(in_sync):
+    assert cma.MCP.active is False
+    tools_ = cma.agent_tools_for_role(Role.INSURER)
+    assert {t["type"] for t in tools_} == {"custom"}
+    assert cma.mcp_servers_for_role(Role.INSURER) == []
+
+
+def test_mcp_mode_swaps_the_transport_not_the_contract(monkeypatch):
+    """One toolset entry replaces 8 inline declarations, but the tools the model
+    can reach are the same 8 — they now live behind the endpoint."""
+    monkeypatch.setattr(cma, "MCP", ON)
+    tools_ = cma.agent_tools_for_role(Role.INSURER)
+    assert tools_ == [{"type": "mcp_toolset", "mcp_server_name": "insurance-insurer"}]
+    assert cma.mcp_servers_for_role(Role.INSURER) == [
+        {"type": "url", "name": "insurance-insurer",
+         "url": "https://x.example.com/mcp/insurer"}]
+
+
+def test_the_adjuster_keeps_its_prebuilt_toolset_in_mcp_mode(monkeypatch):
+    """The memory store is a sandbox mount, not one of our tools, so the
+    read/write/glob toolset is unaffected by the transport."""
+    monkeypatch.setattr(cma, "MCP", ON)
+    types = [t["type"] for t in cma.agent_tools_for_role(Role.ADJUSTER)]
+    assert types == ["agent_toolset_20260401", "mcp_toolset"]
+
+
+def test_a_moved_url_is_drift(monkeypatch, in_sync):
+    """The normal reason this changes: the server is re-homed."""
+    client, config = in_sync
+    monkeypatch.setattr(cma, "MCP", ON)
+    live = _live_agent(Role.AGENT)                       # built with ON
+    assert "mcp_servers" not in cma.agent_drift(live, Role.AGENT, config)
+    monkeypatch.setattr(cma, "MCP", ON.with_overrides(public_url="https://moved.example.com"))
+    assert "mcp_servers" in cma.agent_drift(live, Role.AGENT, config)
+
+
+def test_switching_back_to_custom_tools_clears_the_server(monkeypatch, in_sync):
+    """`mcp_servers` is always sent, including as `[]`. Omitting it would preserve
+    the stale declaration and leave agents pointing at a server we stopped using."""
+    client, config = in_sync
+    monkeypatch.setattr(cma, "MCP", ON)
+    for a in client.beta.agents.by_id.values():
+        a.mcp_servers = [SimpleNamespace(type="url", name="insurance-agent",
+                                         url="https://x.example.com/mcp/agent")]
+    monkeypatch.setattr(cma, "MCP", mcp_server.McpConfig())      # off again
+    cma.update_agents(client, config, only=[Role.AGENT])
+    sent = dict(client.beta.agents.updated)["agent_agent"]
+    assert sent["mcp_servers"] == []
+    assert {t["type"] for t in sent["tools"]} == {"custom"}
+
+
+def test_server_urls_reads_both_dict_and_model_shapes():
+    """The API echoes servers back as models, not the dicts we sent."""
+    as_dict = [{"type": "url", "name": "n", "url": "https://u/mcp/agent"}]
+    as_model = [SimpleNamespace(type="url", name="n", url="https://u/mcp/agent")]
+    assert cma._server_urls(as_dict) == cma._server_urls(as_model) == [("n", "https://u/mcp/agent")]
+
+
+@pytest.mark.parametrize("adjuster_id", sorted(cma._SEED_MEMORY))
+def test_seed_memory_is_text_not_a_tuple(adjuster_id):
+    """Adjacent string literals concatenate; a stray comma makes a tuple instead.
+    That silently produced a 4-tuple, which `memories.create(content=...)` rejects
+    and which crashed `gen_cma_yaml.py`."""
+    assert isinstance(cma._SEED_MEMORY[adjuster_id], str)

@@ -62,8 +62,11 @@ def install_logging(obs: Any, *, loggers: Iterable[str] = DEFAULT_LOGGERS,
         logger.addHandler(handler)
         if logger.level == logging.NOTSET or logger.level > level:
             logger.setLevel(level)
+    # `threshold`, not `level`: `level` is an envelope key, and while EventLog now
+    # survives the collision it renames the field to `field.level`, which reads as
+    # an accident rather than a choice.
     obs.events.debug("logging.installed", loggers=list(loggers),
-                     level=logging.getLevelName(level))
+                     threshold=logging.getLevelName(level))
     return handler
 
 

@@ -796,3 +796,33 @@ def test_disconnected_stream_is_still_timed(tmp_path, upstream):
         wire = obs.paths()["wire"]
     row = _rows(wire)[0]
     assert isinstance(row.get("duration_ms"), int)
+
+
+@pytest.mark.parametrize("method", ["debug", "info", "warn", "error"])
+def test_convenience_methods_survive_a_field_named_level(cfg, method):
+    """`event`'s `level` is keyword-only, so `debug(name, level=...)` raised
+    "got multiple values" before the reserved-key renaming could run — the same
+    collision that made `name` positional-only, one keyword over. It crashed
+    `install_logging` for real, taking the MCP server down at startup."""
+    with Observability.start(cfg, front_end="t") as obs:
+        getattr(obs.events, method)("probe", level="INFO", tool="x")
+        events = obs.paths()["events"]
+    row = next(r for r in _rows(events) if r["event"] == "probe")
+    assert row["level"] == method              # the envelope keeps the severity
+    assert row["field.level"] == "INFO"        # the caller's field is preserved
+    assert row["tool"] == "x"
+
+
+def test_install_logging_does_not_raise(cfg):
+    """The regression that took the server down on boot."""
+    import agent_obs
+    with Observability.start(cfg, front_end="t") as obs:
+        handler = agent_obs.install_logging(obs, loggers=("test.bridge",))
+        try:
+            import logging
+            logging.getLogger("test.bridge").warning("hello from the bridge")
+        finally:
+            agent_obs.uninstall_logging(handler)
+        events = obs.paths()["events"]
+    kinds = {r["event"] for r in _rows(events)}
+    assert "logging.installed" in kinds and "log" in kinds

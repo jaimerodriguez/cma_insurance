@@ -39,6 +39,7 @@ from typing import Any
 
 import agent_obs
 import agent_schemas
+import mcp_server
 import roles
 import storage
 import tools
@@ -60,6 +61,12 @@ MODEL_BY_ROLE = {
     # "claude-opus-4-8" 
 }
 CONFIG_FILE = storage.DATA_DIR / "cma_config.json"
+
+# How the domain tools reach the agents. Inactive by default — with an untouched
+# `.env` this front-end behaves exactly as it did, serving tools inline as custom
+# tools. Set MCP_PUBLIC_URL + MCP_BEARER_TOKEN (or MCP_TOOLS=1) to switch, and
+# `/update-agents` to push the change. See mcp_server.py.
+MCP = mcp_server.McpConfig.from_env()
 
 # Read timeout for the session event stream, in seconds.
 #
@@ -91,12 +98,15 @@ _SEED_MEMORY = {
         "- Lean generous with long-time VIP customers.\n"
         "- Always escalate suspected fraud regardless of cost.\n"
     ),
-    "jane": ( 
-        "Your auto approve (auto_approve) limit is 30000\n\n" , 
-        "Your VIP auto approve (vip_auto_approve) limit is 80000\n\n" , 
-        "Your default authorization limit is 75000 \n\n" ,  
-        "Be diligent for fraud\n\n"
-    )
+    # No commas between the lines: adjacent string literals concatenate, whereas
+    # commas would make this a tuple — which `memories.create(content=...)`
+    # rejects, and which crashed `gen_cma_yaml.py` outright.
+    "jane": (
+        "Your auto approve (auto_approve) limit is 30000\n\n"
+        "Your VIP auto approve (vip_auto_approve) limit is 80000\n\n"
+        "Your default authorization limit is 75000\n\n"
+        "Be diligent for fraud\n"
+    ),
 }
 
 
@@ -116,14 +126,44 @@ def custom_tools_for_role(role: Role) -> list[dict]:
     ]
 
 
+def mcp_tools_for_role(role: Role) -> list[dict]:
+    """The ``mcp_toolset`` entry for a role.
+
+    No per-tool ``configs``: the endpoint URL already decides what exists, so
+    filtering here would be a second, advisory copy of the same allow-list that
+    would need regenerating on every tool change.
+    """
+    return [{"type": "mcp_toolset", "mcp_server_name": mcp_server.server_name(role)}]
+
+
+def mcp_servers_for_role(role: Role) -> list[dict]:
+    """The agent's ``mcp_servers`` entry — empty when the MCP path is off.
+
+    Auth deliberately absent: the Managed Agents agent object has no field for
+    it. Credentials live in a vault, matched to this URL, and reach the session
+    through ``vault_ids``. See ``ensure_vault``.
+    """
+    if not MCP.active:
+        return []
+    return [{"type": "url", "name": mcp_server.server_name(role),
+             "url": MCP.url_for(role)}]
+
+
 def agent_tools_for_role(role: Role) -> list[dict]:
-    """Full tool list for a role's agent (prebuilt toolset for memory + custom tools)."""
-    custom = custom_tools_for_role(role)
+    """Full tool list for a role's agent.
+
+    The domain tools arrive either as inline custom tools (the default: we
+    execute them and hand results back over the session stream) or as an MCP
+    toolset (Anthropic calls our server directly). Same 31 functions and the same
+    generated schemas either way — only the transport differs.
+    """
+    domain = mcp_tools_for_role(role) if MCP.active else custom_tools_for_role(role)
     if role is Role.ADJUSTER:
         # The prebuilt toolset gives read/write/edit/glob so the agent can use its
-        # mounted memory store.
-        return [{"type": "agent_toolset_20260401"}, *custom]
-    return custom
+        # mounted memory store. Unaffected by the transport choice — the memory
+        # store is a sandbox mount, not one of our tools.
+        return [{"type": "agent_toolset_20260401"}, *domain]
+    return domain
 
 
 # --- system prompts (role-generic on the agent; identity injected per session) ---
@@ -402,6 +442,7 @@ def _desired_agent(role: Role, config: dict,
         "system": _agent_system(role),
         "tools": agent_tools_for_role(role),
         "multiagent": _multiagent_config(role, config, versions),
+        "mcp_servers": mcp_servers_for_role(role),
     }
 
 
@@ -495,6 +536,24 @@ def _refs_match(live: list[tuple[str, int | None]],
                for (_, lv), (_, wv) in zip(live, want))
 
 
+def _server_urls(mcp_servers: Any) -> list[tuple[str, str]]:
+    """``(name, url)`` per declared MCP server, sorted — from either shape.
+
+    Compared rather than the whole object because the API echoes servers back as
+    models, and because the URL is the part that actually changes (a tunnel or VM
+    hostname moving is the normal reason this drifts).
+    """
+    out = []
+    for s in mcp_servers or []:
+        if isinstance(s, dict):
+            name, url = s.get("name"), s.get("url")
+        else:
+            name, url = getattr(s, "name", None), getattr(s, "url", None)
+        if name and url:
+            out.append((name, url))
+    return sorted(out)
+
+
 def agent_drift(agent: Any, role: Role, config: dict,
                 versions: dict[str, int] | None = None) -> list[str]:
     """Names of the code-defined fields that differ from the live agent.
@@ -518,6 +577,9 @@ def agent_drift(agent: Any, role: Role, config: dict,
     if not _refs_match(_roster_refs(getattr(agent, "multiagent", None)),
                        _roster_refs(desired["multiagent"])):
         drift.append("multiagent")
+    if _server_urls(getattr(agent, "mcp_servers", None)) != _server_urls(
+            desired["mcp_servers"]):
+        drift.append("mcp_servers")
     return drift
 
 
@@ -552,6 +614,11 @@ def update_agents(client, config: dict, only: Sequence[Role] | None = None,
         One record per role: ``{role, agent_id, action, changed, version}`` where
         ``action`` is ``updated`` / ``unchanged`` / ``missing``.
     """
+    # A moved URL has to land on the credential and the agent together, or the
+    # agents point somewhere the vault cannot authenticate.
+    if MCP.active:
+        ensure_vault(client, config)
+
     results: list[dict[str, Any]] = []
     # Current version per agent id, filled in as we go and consulted when a
     # coordinator's roster is built. Delegation *targets* are processed first so
@@ -601,6 +668,10 @@ def update_agents(client, config: dict, only: Sequence[Role] | None = None,
         # whereas an explicit None would clear a roster that is already there.
         if desired["multiagent"] is not None:
             fields["multiagent"] = desired["multiagent"]
+        # Always sent, including as `[]`. Unlike the roster, clearing this is a
+        # real operation: switching back to custom tools has to remove the server
+        # declaration, and an omitted field would leave the old URL in place.
+        fields["mcp_servers"] = desired["mcp_servers"]
         updated = client.beta.agents.update(agent.id, **fields)
         versions[agent.id] = updated.version   # later rosters pin the fresh one
         agent_obs.current().events.info(
@@ -612,6 +683,53 @@ def update_agents(client, config: dict, only: Sequence[Role] | None = None,
                         "action": "updated", "changed": drift or ["(forced)"],
                         "version": updated.version})
     return results
+
+
+def ensure_vault(client, config: dict) -> dict[str, Any]:
+    """Idempotently hold one ``static_bearer`` credential per MCP endpoint URL.
+
+    Auth for an MCP server cannot live on the agent — ``mcp_servers`` entries are
+    ``{type, name, url}`` with no token field. It lives in a vault, matched to a
+    server by URL, and reaches the run through ``vault_ids`` on session create.
+
+    Reconciled by URL rather than tracked by id, because the URL is what moves:
+    re-home the server and every credential keyed to the old hostname is dead
+    weight. Stale ones are archived (a vault caps at 20 credentials, and a
+    forgotten token is a liability).
+
+    Returns ``{"vault_id", "created", "archived", "unchanged"}``.
+    """
+    if not MCP.active:
+        return {"vault_id": None, "created": [], "archived": [], "unchanged": []}
+    if not MCP.token:
+        raise SystemExit("MCP is active but MCP_BEARER_TOKEN is unset — refusing "
+                         "to point agents at an unauthenticated tool server.")
+
+    vault_id = config.get("vault_id")
+    if not vault_id:
+        vault_id = client.beta.vaults.create(display_name="insurance-mcp").id
+        config["vault_id"] = vault_id
+        _save_config(config)
+
+    wanted = {MCP.url_for(role) for role in Role}
+    live = {}
+    for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
+        url = getattr(getattr(cred, "auth", None), "mcp_server_url", None)
+        if url:
+            live[url] = cred.id
+
+    created, archived = [], []
+    for url in sorted(wanted - set(live)):
+        client.beta.vaults.credentials.create(
+            vault_id=vault_id, display_name=f"mcp {url.rsplit('/', 1)[-1]}",
+            auth={"type": "static_bearer", "token": MCP.token, "mcp_server_url": url})
+        created.append(url)
+    for url in sorted(set(live) - wanted):
+        client.beta.vaults.credentials.archive(live[url], vault_id=vault_id)
+        archived.append(url)
+
+    return {"vault_id": vault_id, "created": created, "archived": archived,
+            "unchanged": sorted(wanted & set(live))}
 
 
 # --- session runtime --------------------------------------------------------
@@ -670,6 +788,10 @@ class CmaSession:
             environment_id=self.config["environment_id"],
             resources=resources,
             title=f"{self.role.value}:{self.identity}",
+            # How the bearer token reaches the MCP server. Absent in custom-tool
+            # mode, where there is no server to authenticate to.
+            **({"vault_ids": [self.config["vault_id"]]}
+               if MCP.active and self.config.get("vault_id") else {}),
         )
         return session.id
 
@@ -821,6 +943,7 @@ def run_agent_maintenance(client, config: dict) -> str:
 
 _HELP = """Commands:
   /setup             provision the environment, agents, and memory stores (run once)
+  /mcp               show the tool transport (inline custom tools vs MCP server)
   /update-agents     push this file's system prompts + tools onto the existing
                      agents (add a role to limit it, `--force` to update anyway)
   /adjuster <name>   start an adjuster session (by user_id), e.g. /adjuster jaime
@@ -969,6 +1092,20 @@ def main() -> None:
                                     agents=list(config.get("agents") or {}))
                     print(f"Setup complete. environment={config['environment_id']}, "
                           f"agents={list(config['agents'])}, memory_stores={list(config['memory_stores'])}")
+                elif cmd == "/mcp":
+                    print(f"  tool transport: "
+                          f"{'MCP server' if MCP.active else 'inline custom tools'}")
+                    for k, v in MCP.describe().items():
+                        print(f"  {k:12} {v}")
+                    if MCP.active:
+                        import urllib.error
+                        import urllib.request
+                        health = f"{MCP.public_url.rstrip('/')}/healthz"
+                        try:
+                            with urllib.request.urlopen(health, timeout=5) as r:
+                                print(f"  healthz      {r.status} {r.read(200).decode()}")
+                        except (urllib.error.URLError, OSError) as exc:
+                            print(f"  healthz      unreachable: {exc}")
                 elif cmd == "/update-agents":
                     force = "--force" in args_
                     named = [a for a in args_ if not a.startswith("-")]

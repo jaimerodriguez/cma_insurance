@@ -39,6 +39,10 @@ MS_JANE=$(ant beta:memory-stores create \
   --name "adjuster-jane" \
   --description "Personal memory for adjuster jane: auto-approval policy overrides and working notes." \
   --transform id --raw-output)
+ant beta:memory-stores:memories create \
+  --memory-store-id "$MS_JANE" \
+  --path "/policies.md" \
+  --content @seed/jane.md >/dev/null
 echo "  memory store adjuster-jane: $MS_JANE"
 
 echo "Writing ../data/cma_config.json..."

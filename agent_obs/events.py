@@ -76,19 +76,33 @@ class EventLog:
             row[f"field.{key}" if key in _RESERVED_KEYS else key] = value
         self.sink.write(row)
 
+    def _at(self, severity: str, name: str, fields: dict[str, Any]) -> None:
+        """Forward to ``event`` at a fixed severity, without the `level` collision.
+
+        ``event``'s ``level`` is keyword-only, so ``debug(name, level=…)`` raises
+        ``got multiple values for keyword argument 'level'`` *before* the
+        reserved-key renaming at the bottom of ``event`` can run — the same
+        collision class that made ``name`` positional-only, one keyword over. It
+        is renamed here to the name ``event`` would have given it anyway, so a
+        caller field called ``level`` is preserved rather than fatal.
+        """
+        if "level" in fields:
+            fields["field.level"] = fields.pop("level")
+        self.event(name, level=severity, **fields)
+
     # Convenience wrappers so callers read as logging calls. `name` is
     # positional-only here for the same reason as in event().
     def debug(self, name: str, /, **fields: Any) -> None:
-        self.event(name, level="debug", **fields)
+        self._at("debug", name, fields)
 
     def info(self, name: str, /, **fields: Any) -> None:
-        self.event(name, level="info", **fields)
+        self._at("info", name, fields)
 
     def warn(self, name: str, /, **fields: Any) -> None:
-        self.event(name, level="warn", **fields)
+        self._at("warn", name, fields)
 
     def error(self, name: str, /, **fields: Any) -> None:
-        self.event(name, level="error", **fields)
+        self._at("error", name, fields)
 
     def stderr_sink(self, line: str) -> None:
         """Passed to ``ClaudeAgentOptions.stderr``.

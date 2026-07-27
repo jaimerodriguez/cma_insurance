@@ -343,10 +343,77 @@ Agents enabled.
 python3 cma.py
 # then, in the REPL:
 /setup                 # provision environment + per-role agents + memory stores (idempotent)
+/mcp                   # which transport the tools use, and is the server reachable
+/update-agents         # push this file's prompts + tools onto the live agents
 /adjuster jaime        # start a hosted adjuster session
 /insurer  ins-1001     # start a hosted policyholder session
 /agent                 # run the maintenance agent
 ```
+
+### Tool transport: custom tools vs MCP (`mcp_server.py`)
+
+The 31 domain tools reach a hosted agent one of two ways. **Custom tools** is the
+default and needs nothing: Anthropic hands each call back to us over the session
+event stream and waits while we execute it. **MCP** serves the same tools from an
+HTTP server that Anthropic calls directly, so the session never blocks on us —
+which is what makes unattended and scheduled runs possible.
+
+```bash
+python3 mcp_server.py --new-token      # generate MCP_BEARER_TOKEN
+python3 mcp_server.py --print-config   # check what it resolved (token fingerprinted)
+python3 mcp_server.py                  # serve on 127.0.0.1:8787
+```
+
+Set `MCP_PUBLIC_URL` + `MCP_BEARER_TOKEN` in `.env` and run `/update-agents`.
+`MCP_TOOLS=0` forces the inline path back on without clearing them. With both
+unset — the default — nothing about `cma.py` changes.
+
+`mcp_server.py` is a **facade**: every call lands on `repl._dispatch` against a
+`roles.dispatch_table`, so `tools.py`, `storage.py` and `agent_schemas.py` are
+untouched and each call is traced by `@agent_obs.traced_dispatch` exactly as on
+the other backends. One endpoint per role — `/mcp/adjuster`, `/mcp/insurer`,
+`/mcp/agent` — each serving only that role's tools, which keeps the guarantee
+`roles.dispatch_table` makes. A single endpoint with per-agent `mcp_toolset`
+filtering would be simpler to host, but that filter changes what the model is
+*offered*, not what the server will *execute*.
+
+**It is not a latency win here.** The tools are local JSON file I/O at 2-9 ms and
+MCP replaces that with a network round trip. Adopt it for availability.
+
+Auth is a static bearer token — the agent object has no auth field, so the token
+lives in a Managed Agents **vault** keyed by endpoint URL and reaches the run via
+`vault_ids`. `ensure_vault` reconciles those by URL, because the URL is what moves
+when the server is re-homed.
+
+#### What the facade cannot simply wrap
+
+Four places need more than delegation, and one is a genuine architectural split:
+
+1. **Concurrency.** `storage.py` is whole-file read-modify-write with no locking —
+   safe today only because every backend dispatches serially. An HTTP server does
+   not, so `dispatch_guarded` holds a process lock across the *entire* call.
+   Locking just the write would not help: two callers that each read before either
+   writes still lose one another's changes, across unrelated records.
+2. **Schema generation.** `FastMCP` derives input schemas from Python signatures
+   via pydantic with no override, which would discard
+   `agent_schemas.build_tool_schemas()` — the docstring parsing, the `ReportType`
+   bitmask descriptions, and the nullable-optional fix. The low-level
+   `mcp.server.lowlevel.Server` is used instead so our schemas publish verbatim.
+3. **Adjuster memory is sandbox-side, tools are server-side.** `/mnt/memory` is a
+   mount inside Anthropic's container, reachable only by the prebuilt toolset —
+   the MCP server cannot see it. That split is fine today (the adjuster reads its
+   memory in the sandbox and passes the resulting `policies` object to our tool),
+   but the two stores are not the same thing and cannot be merged by the facade.
+4. **Where `data/` lives.** Hosting the server elsewhere means the hosted tools and
+   your local `repl.py` read different state. Nothing in the facade reconciles
+   that; centralising storage is a separate decision. Related: `agent_memory.py`
+   binds its path from `storage.DATA_DIR` **at import**, so it escapes any later
+   redirection of that constant.
+
+One smaller caveat: the server runs its own `Observability` run (`front_end="mcp"`,
+its own trace files) because `agent_obs.current()` is a process global. Tool events
+are traced normally, but spans may root themselves rather than nest under the
+session span — events carry `run_id`, so correlation is unaffected.
 
 `/setup` writes resource IDs to `data/cma_config.json`, which the runtime consumes.
 Per-role models are configured in `MODEL_BY_ROLE` (`INSURER`→Haiku, `ADJUSTER`→Sonnet,
