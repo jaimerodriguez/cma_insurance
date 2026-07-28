@@ -69,6 +69,17 @@ def save_incident(incident: Incident) -> None:
     _write_incidents(incidents)
 
 
+def replace_incidents(incidents: dict[str, Incident]) -> None:
+    """Overwrite ``incidents.json`` wholesale, discarding everything already there.
+
+    A public, deliberately blunt name for ``_write_incidents``. Every other
+    writer here is read-modify-write and preserves the rest of the file; this one
+    does not, so the call site should have to say the destructive word out loud.
+    Used by ``tools.generate_unassigned_incidents`` to reset the claim set.
+    """
+    _write_incidents(incidents)
+
+
 def update_incident(incident_id: str, mutate: Callable[[Incident], None]) -> Incident | None:
     """Load an incident, apply ``mutate`` in place, persist, and return it (or None)."""
     incidents = load_incidents()

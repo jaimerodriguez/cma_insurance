@@ -155,7 +155,10 @@ dispatch table, so a persona can never call a tool it isn't granted.
 - **AGENT** — the unattended maintenance persona. Routes unassigned incidents to
   authorization-appropriate adjusters, triages them via `process_incident`, and closes
   stale resolved claims. On the Agent SDK backend it then **delegates the decisions
-  to adjuster subagents** (below) rather than making them itself.
+  to adjuster subagents** (below) rather than making them itself. It alone holds
+  `generate_unassigned_incidents(count)`, which **replaces** the whole claim set
+  with 5–50 fresh randomly generated unassigned claims — a demo/load-test reset,
+  and the reason an adjuster must not have it.
 
 ### Adjuster subagents (Agent SDK backend only)
 
@@ -352,7 +355,7 @@ python3 cma.py
 
 ### Tool transport: custom tools vs MCP (`mcp_server.py`)
 
-The 31 domain tools reach a hosted agent one of two ways. **Custom tools** is the
+The 32 domain tools reach a hosted agent one of two ways. **Custom tools** is the
 default and needs nothing: Anthropic hands each call back to us over the session
 event stream and waits while we execute it. **MCP** serves the same tools from an
 HTTP server that Anthropic calls directly, so the session never blocks on us —
@@ -389,7 +392,7 @@ when the server is re-homed.
 see **[ACA_Deploy.md](ACA_Deploy.md)**: a `Dockerfile` and step-by-step Azure
 Container Apps setup, including how to start and stop it to keep the cost at
 zero between runs. Container Apps rather than Azure Functions because the
-Functions MCP extension would force all 40 tool schemas to be re-declared by
+Functions MCP extension would force all 41 tool schemas to be re-declared by
 hand in a vocabulary that cannot express our enums, nested objects, or nullable
 unions. The image is the deployable subset only — no `cma.py`, no `anthropic`,
 no Agent SDK; a test asserts the `COPY` list still covers `mcp_server`'s real

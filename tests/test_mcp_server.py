@@ -95,7 +95,7 @@ def test_mcp_tools_publish_our_schemas_verbatim(role):
 
 
 @pytest.mark.parametrize("role,count", [(Role.ADJUSTER, 21), (Role.INSURER, 8),
-                                        (Role.AGENT, 11)])
+                                        (Role.AGENT, 12)])
 def test_each_endpoint_serves_exactly_its_role(role, count):
     names = {s["name"] for s in mcp_server.tool_specs(role)}
     assert names == roles.ROLE_TOOLS[role]

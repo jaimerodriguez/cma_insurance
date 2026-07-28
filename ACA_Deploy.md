@@ -116,7 +116,7 @@ echo "https://$FQDN"
 curl -s https://$FQDN/healthz | python3 -m json.tool
 ```
 
-Expect `{"ok": true, "run_id": "...", "tools": {"adjuster": 21, "insurer": 8, "agent": 11}}`.
+Expect `{"ok": true, "run_id": "...", "tools": {"adjuster": 21, "insurer": 8, "agent": 12}}`.
 Those three counts are the real check: they mean `agent_schemas` ran and the
 role tables built correctly inside the container.
 

@@ -61,6 +61,10 @@ ROLE_TOOLS: dict[Role, set[str]] = {
         "append_insurer_history", "append_insurer_preferences",
     },
     Role.AGENT: {
+        # AGENT only. It wipes and regenerates the whole claim set, which is a
+        # setup operation, not claims work — an adjuster must never be able to
+        # discard the claims it is being asked to handle.
+        "generate_unassigned_incidents",
         "close_stale_resolved", "list_incidents", "get_incident_details", "update_status",
         "process_incident", "assign_incident", "escalate_to_management",
         "find_adjuster", "list_adjusters", "get_adjuster_details",

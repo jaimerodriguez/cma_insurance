@@ -526,6 +526,23 @@
     }
   },
   {
+    "name": "generate_unassigned_incidents",
+    "description": "Generate a fresh batch of random unassigned claims, replacing all existing ones.  **This is destructive.** ``incidents.json`` is overwritten wholesale \u2014 every claim already on file is discarded, including any an adjuster has worked. Intended for setting up a demo or a load test from a clean slate, not for adding claims to a live set (use ``create_incident`` for that).  Each generated claim is realistic and internally consistent: the policy is drawn from the real policies on file, the insurer is the one that actually holds that policy, and the kind of loss matches the policy type (a vehicle loss on an auto policy, a dwelling loss on a home policy). Costs span every authorization band, so the batch exercises the whole triage path from auto-approval up to management override. Every claim is created with ``adjuster_id`` set to the unassigned placeholder, ``status`` NEW and ``resolution`` INPROGRESS, so routing has work to do.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "description": "How many claims to generate. Must be between 5 and 50 inclusive; anything outside that range is rejected rather than clamped."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "count"
+      ]
+    }
+  },
+  {
     "name": "append_incident_history",
     "description": "Append a date-stamped note to an incident's history log and save it.  The note is prefixed with today's date and added on a new line, e.g. \"left voicemail for policyholder\" becomes \"7/23/2026 - left voicemail for policyholder\".",
     "input_schema": {

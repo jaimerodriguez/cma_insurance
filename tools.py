@@ -13,6 +13,8 @@ Conventions:
       date-stamped); ``set_*`` overwrites it (pass ``None`` to clear).
 """
 
+import random
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -835,6 +837,214 @@ def close_stale_resolved(minutes: int = 30) -> list[Incident]:
     return closed
 
 
+# --- synthetic claim generation ---------------------------------------------
+#
+# Regenerates the claim set for demos and load-testing, replacing the hand-built
+# ``data/synthetic-incidents-*-unassigned.json`` fixtures with something a
+# deployed server can produce on demand. Those fixtures predate the HOME_* report
+# types, so they only ever contain the three vehicle/theft flags; what is
+# generated here matches the loss type to the policy it is filed against, which
+# is both more realistic and exercises the dwelling-loss triage paths.
+
+# Named rather than inline so the docstring, the validation and the tests all
+# read the same two numbers.
+MIN_GENERATED_INCIDENTS = 5
+MAX_GENERATED_INCIDENTS = 50
+
+# (report type, detail sentence, cost floor, cost ceiling). The bands straddle
+# the ``DynamicPolicies`` authorization limits (5000 / 15000 / 50000) on purpose,
+# so a generated batch routes across every band — including above the top one,
+# which is the OVERRIDE_NEEDED / ESCALATED_TO_MANAGEMENT path.
+_Scenario = tuple[ReportType, str, int, int]
+
+_SCENARIOS: dict[PolicyType, tuple[_Scenario, ...]] = {
+    PolicyType.AUTO: (
+        (ReportType.CAR_ACCIDENT,
+         "{name} was rear-ended at a signalled intersection and reports damage to "
+         "the bumper, tailgate and one rear light cluster. A police exchange form, "
+         "tow invoice and body-shop estimate were supplied.", 2200, 14000),
+        (ReportType.CAR_ACCIDENT,
+         "{name} reports that another driver merged into the sedan on the highway, "
+         "damaging the doors and one wheel. Scene photographs and a repair "
+         "estimate were provided.", 3500, 26000),
+        (ReportType.STOLEN_CAR,
+         "{name} reports the insured vehicle was taken overnight from a residential "
+         "street. A police report number was filed the same morning and both sets "
+         "of keys are accounted for.", 9000, 62000),
+        (ReportType.STOLEN_CAR | ReportType.CAR_ACCIDENT,
+         "The insured vehicle was taken from a parking structure and recovered two "
+         "days later with substantial front-end damage. {name} supplied the "
+         "recovery paperwork and an inspection report.", 12000, 74000),
+    ),
+    PolicyType.HOME: (
+        (ReportType.HOME_ACCIDENT,
+         "A supply line failed under the upstairs bathroom and flooded two rooms "
+         "before {name} shut off the main. A plumber's invoice and moisture-"
+         "mitigation quote were provided.", 4000, 31000),
+        (ReportType.HOME_ACCIDENT,
+         "A kitchen fire spread to the cabinetry and ceiling. The fire service "
+         "attended and {name} supplied the incident number along with two "
+         "restoration estimates.", 8000, 58000),
+        (ReportType.HOME_THEFT,
+         "{name} returned to find a forced rear entry and reports missing "
+         "electronics, jewellery and a bicycle. A police report was filed and an "
+         "itemised loss schedule was supplied.", 2500, 22000),
+        (ReportType.HOME_NATURAL_DISASTER,
+         "Storm winds lifted part of the roof covering and driven rain damaged the "
+         "ceilings below. {name} provided photographs, a tarping invoice and a "
+         "roofer's assessment.", 6000, 88000),
+        (ReportType.HOME_NATURAL_DISASTER | ReportType.HOME_ACCIDENT,
+         "Freezing weather burst an exterior pipe and the resulting water damage "
+         "spread through the ground floor. {name} supplied the utility shut-off "
+         "record and a remediation quote.", 11000, 95000),
+    ),
+    PolicyType.OTHER: (
+        (ReportType.STOLEN_OTHER,
+         "{name} reports a break-in at a detached outbuilding, with tools and "
+         "equipment taken. A police report was filed and receipts were supplied "
+         "for the higher-value items.", 2200, 19000),
+        (ReportType.STOLEN_OTHER,
+         "Insured property was taken from {name}'s vehicle while it was parked at a "
+         "job site. An itemised list and purchase records were provided.", 2400, 27000),
+    ),
+}
+
+# Appended to `history`. Varying the policyholder's demeanour gives the adjuster
+# persona something to react to rather than 50 identical intake notes.
+_INTAKE_NOTES: tuple[str, ...] = (
+    "The policyholder was calm and cooperative, answered questions directly, and "
+    "had the initial documents organized.",
+    "The policyholder was audibly distressed and asked twice about the expected "
+    "timeline; the process was explained and a callback was offered.",
+    "The policyholder was brisk and wanted the claim number immediately; "
+    "documentation arrived within the hour.",
+    "The policyholder was unsure which documents were needed and was walked "
+    "through the list; most items were supplied the same day.",
+    "The policyholder mentioned a prior claim and asked whether it would affect "
+    "this one; no determination was made on the call.",
+)
+
+
+def generate_unassigned_incidents(count: int) -> dict[str, Any]:
+    """Generate a fresh batch of random unassigned claims, replacing all existing ones.
+
+    **This is destructive.** ``incidents.json`` is overwritten wholesale — every
+    claim already on file is discarded, including any an adjuster has worked.
+    Intended for setting up a demo or a load test from a clean slate, not for
+    adding claims to a live set (use ``create_incident`` for that).
+
+    Each generated claim is realistic and internally consistent: the policy is
+    drawn from the real policies on file, the insurer is the one that actually
+    holds that policy, and the kind of loss matches the policy type (a vehicle
+    loss on an auto policy, a dwelling loss on a home policy). Costs span every
+    authorization band, so the batch exercises the whole triage path from
+    auto-approval up to management override. Every claim is created with
+    ``adjuster_id`` set to the unassigned placeholder, ``status`` NEW and
+    ``resolution`` INPROGRESS, so routing has work to do.
+
+    Args:
+        count: How many claims to generate. Must be between 5 and 50 inclusive;
+            anything outside that range is rejected rather than clamped.
+
+    Returns:
+        A summary of what was written: ``count`` generated, ``replaced`` (how
+        many claims were discarded), ``by_type`` keyed by report-type name,
+        ``cost_range`` as ``[min, max]``, and a sample of the new incident ids.
+        Deliberately a summary and not the claims themselves — returning 50 full
+        records would cost thousands of tokens the caller did not ask for. Use
+        ``list_incidents`` to read them back.
+
+    Raises:
+        ValueError: If ``count`` is out of range, or if there are no policies on
+            file to file claims against.
+    """
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise ValueError(f"count must be an integer, got {type(count).__name__}")
+    if not MIN_GENERATED_INCIDENTS <= count <= MAX_GENERATED_INCIDENTS:
+        raise ValueError(
+            f"count must be between {MIN_GENERATED_INCIDENTS} and "
+            f"{MAX_GENERATED_INCIDENTS} inclusive, got {count}")
+
+    policies = list(storage.load_policies().values())
+    if not policies:
+        raise ValueError(
+            "no policies on file — claims cannot be generated without policies "
+            "to file them against")
+    insurers = storage.load_insurers()
+    replaced = len(storage.load_incidents())
+
+    now = datetime.now(timezone.utc)
+    generated: dict[str, Incident] = {}
+    by_type: dict[str, int] = {}
+
+    for _ in range(count):
+        policy = random.choice(policies)
+        insurer = insurers.get(policy.insurer_id)
+        # First name only: the scenario text reads as a claims note, not a form.
+        name = insurer.full_name.split()[0] if insurer else "The policyholder"
+
+        # PolicyType.OTHER is the fallback for a policy type with no scenarios
+        # rather than a KeyError — a new PolicyType member should degrade to a
+        # generic theft claim, not break generation.
+        report_type, body, low, high = random.choice(
+            _SCENARIOS.get(policy.policy_type, _SCENARIOS[PolicyType.OTHER]))
+
+        # Round to the nearest hundred: estimates in this domain are quoted, not
+        # measured, and $6,800 reads as an assessment where $6,847 reads as a bug.
+        cost = random.randint(low // 100, high // 100) * 100
+
+        loss_days_ago = random.randint(1, 45)
+        loss_date = (now - timedelta(days=loss_days_ago)).date()
+        submitted = now - timedelta(days=loss_days_ago,
+                                    hours=-random.randint(4, 60))
+
+        details = (
+            f"Loss date {loss_date.isoformat()}. "
+            f"{body.format(name=name)} "
+            f"Reported under policy {policy.id}. "
+            f"Estimated cost is ${cost:,}."
+        )
+        history = (
+            f"{submitted.date().isoformat()} - Incident report received. "
+            f"{random.choice(_INTAKE_NOTES)} "
+            f"Awaiting assignment; no coverage or resolution decision has been made."
+        )
+
+        incident = Incident(
+            policy_id=policy.id,
+            adjuster_id=UNASSIGNED,
+            insurer_id=policy.insurer_id,
+            incident_type=report_type,
+            incident_details=details,
+            submitted_date=submitted,
+            status=ReportStatus.NEW,
+            resolution=Resolution.INPROGRESS,
+            estimate_cost=cost,
+            history=history,
+            # Drawn from `random` rather than uuid4 so that seeding the module
+            # reproduces a batch exactly — which is what makes the generator
+            # testable and a demo repeatable.
+            id=str(uuid.UUID(int=random.getrandbits(128), version=4)),
+        )
+        generated[incident.id] = incident
+        # `.name`, not `str()`: IntFlag's __str__ is int.__str__, so str() would
+        # key this by "5" where .name gives "STOLEN_CAR|CAR_ACCIDENT".
+        label = report_type.name or str(int(report_type))
+        by_type[label] = by_type.get(label, 0) + 1
+
+    storage.replace_incidents(generated)
+
+    costs = [i.estimate_cost for i in generated.values()]
+    return {
+        "count": len(generated),
+        "replaced": replaced,
+        "adjuster_id": UNASSIGNED,
+        "by_type": dict(sorted(by_type.items())),
+        "cost_range": [min(costs), max(costs)],
+        "sample_ids": list(generated)[:3],
+    }
+
+
 # --- agent tool registry ----------------------------------------------------
 #
 # The single source of truth for which functions should be exposed to an AI
@@ -868,6 +1078,7 @@ AGENT_TOOLS: list[Callable[..., Any]] = [
     notify_update,
     # -- maintenance --
     close_stale_resolved,
+    generate_unassigned_incidents,
     # -- history --
     append_incident_history,
     append_adjuster_history,
