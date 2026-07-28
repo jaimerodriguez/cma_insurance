@@ -613,3 +613,79 @@ def test_seed_memory_is_text_not_a_tuple(adjuster_id):
     That silently produced a 4-tuple, which `memories.create(content=...)` rejects
     and which crashed `gen_cma_yaml.py`."""
     assert isinstance(cma._SEED_MEMORY[adjuster_id], str)
+
+
+# --- /agent taking instructions ---------------------------------------------
+
+@pytest.mark.parametrize("line,cmd,tokens,rest", [
+    ("/agent", "/agent", [], ""),
+    ("/agent   ", "/agent", [], ""),
+    ("/agent close the stale claims", "/agent", ["close", "the", "stale", "claims"],
+     "close the stale claims"),
+    ("/update-agents adjuster --force", "/update-agents", ["adjuster", "--force"],
+     "adjuster --force"),
+    ("/adjuster jaime", "/adjuster", ["jaime"], "jaime"),
+])
+def test_split_command_gives_both_views_of_the_arguments(line, cmd, tokens, rest):
+    assert cma.split_command(line) == (cmd, tokens, rest)
+
+
+def test_split_command_preserves_spacing_inside_an_instruction():
+    """`" ".join(tokens)` would collapse it. Instructions are prose sent verbatim
+    to a model, so the author's line breaks and spacing are theirs to keep."""
+    _, _, rest = cma.split_command("/agent Triage claim-1.  Then  report back.")
+    assert rest == "Triage claim-1.  Then  report back."
+
+
+def test_run_agent_task_sends_exactly_the_instructions_given(monkeypatch):
+    """The whole point of the change: no hard-coded prompt between the caller
+    and the agent."""
+    sent = {}
+
+    class _FakeSession:
+        def __init__(self, client, config, role, identity):
+            sent["role"], sent["identity"] = role, identity
+
+        def send(self, text):
+            sent["text"] = text
+            return "report"
+
+    monkeypatch.setattr(cma, "CmaSession", _FakeSession)
+    out = cma.run_agent_task(None, _CONFIG, "Close everything resolved over a week ago.")
+
+    assert out == "report"
+    assert sent["text"] == "Close everything resolved over a week ago."
+    assert sent["role"] is Role.AGENT
+    assert sent["identity"] == cma.AGENT_IDENTITY
+
+
+def test_the_suggested_task_is_a_suggestion_not_a_default(monkeypatch):
+    """It used to be the only thing /agent could do. It must not sneak back in as
+    a fallback — an empty instruction should reach the agent as given, not be
+    silently replaced."""
+    sent = {}
+
+    class _FakeSession:
+        def __init__(self, *a):
+            pass
+
+        def send(self, text):
+            sent["text"] = text
+            return ""
+
+    monkeypatch.setattr(cma, "CmaSession", _FakeSession)
+
+    # The empty string is the case that matters. `send(instructions or
+    # SUGGESTED_AGENT_TASK)` is the obvious-looking mutation, and any test that
+    # passes a non-empty instruction never triggers it.
+    cma.run_agent_task(None, _CONFIG, "")
+    assert sent["text"] == "", (
+        "an empty instruction was silently replaced with the canned prompt")
+
+    cma.run_agent_task(None, _CONFIG, "just do the routing")
+    assert sent["text"] == "just do the routing"
+
+
+def test_help_documents_both_agent_forms():
+    assert "/agent <text>" in cma._HELP
+    assert "/agent  " in cma._HELP        # the bare, session-starting form

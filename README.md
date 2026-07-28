@@ -350,8 +350,15 @@ python3 cma.py
 /update-agents         # push this file's prompts + tools onto the live agents
 /adjuster jaime        # start a hosted adjuster session
 /insurer  ins-1001     # start a hosted policyholder session
-/agent                 # run the maintenance agent
+/agent Triage the unassigned claims and report back.   # one-shot instruction
+/agent                 # start an agent session, then type instructions freely
 ```
+
+`/agent` takes whatever you type after it and sends exactly that — there is no
+canned prompt in between. The one-shot form leaves your current session alone;
+the bare form starts an AGENT session, so the agent can be talked to across turns
+like the other two personas. `/help` prints a suggested triage instruction to
+start from.
 
 ### Tool transport: custom tools vs MCP (`mcp_server.py`)
 

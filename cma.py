@@ -930,13 +930,43 @@ class CmaSession:
         return "".join(text_parts).strip()
 
 
-@agent_obs.trace_callable("cma.maintenance", kind="maintenance")
-def run_agent_maintenance(client, config: dict) -> str:
-    """Run the maintenance persona as a CMA session and return its report."""
-    session = CmaSession(client, config, Role.AGENT, "system")
-    return session.send(
-        "Process all the unassigned claims. Auto approve as many as you can. Delegate to adjusters as needed, then report back the summary on all actions performed."         
-    )
+# Identity the AGENT persona runs under. Unlike ADJUSTER and INSURER, whose
+# identity is a real record id, the maintenance persona is not a person.
+AGENT_IDENTITY = "system"
+
+# Offered by `/agent` as a starting point rather than hard-wired into it. It was
+# the only thing `/agent` could ever do; keeping it as a suggestion means the
+# common run is still one keystroke away without being the only option.
+SUGGESTED_AGENT_TASK = (
+    "Process all the unassigned claims. Auto approve as many as you can. "
+    "Delegate to adjusters as needed, then report back the summary on all "
+    "actions performed."
+)
+
+
+def split_command(line: str) -> tuple[str, list[str], str]:
+    """Split a REPL line into ``(command, tokens, rest)``.
+
+    Two views of the arguments because the commands want different things:
+    ``/update-agents`` wants tokens to pick flags out of, while ``/agent`` wants
+    the prose exactly as typed. Deriving ``rest`` by slicing the original line
+    rather than ``" ".join(tokens)`` is what preserves the author's spacing.
+    """
+    tokens = line.split()
+    command = tokens[0]
+    return command, tokens[1:], line[len(command):].strip()
+
+
+@agent_obs.trace_callable("cma.agent_task", kind="maintenance")
+def run_agent_task(client, config: dict, instructions: str) -> str:
+    """Run one instruction through a fresh AGENT session and return its report.
+
+    One-shot: the session is created, used and dropped, so the REPL's current
+    session is left alone. For a conversation with the agent, bare ``/agent``
+    starts a session instead.
+    """
+    session = CmaSession(client, config, Role.AGENT, AGENT_IDENTITY)
+    return session.send(instructions)
 
 
 # --- REPL -------------------------------------------------------------------
@@ -948,7 +978,9 @@ _HELP = """Commands:
                      agents (add a role to limit it, `--force` to update anyway)
   /adjuster <name>   start an adjuster session (by user_id), e.g. /adjuster jaime
   /insurer <id>      start a policyholder session (by insurer id), e.g. /insurer ins-1001
-  /agent             run the maintenance agent now (close stale resolved claims)
+  /agent <text>      run one instruction through the maintenance agent and print
+                     its report (one-shot; the current session is left alone)
+  /agent             start an agent session, then type instructions freely
   /whoami            show the current role
   /obs               observability status (add `tail [n]` or `stats [by]`)
   /help              show this help
@@ -1076,8 +1108,7 @@ def main() -> None:
                 continue
 
             if line.startswith("/"):
-                parts = line.split()
-                cmd, args_ = parts[0], parts[1:]
+                cmd, args_, rest = split_command(line)
                 obs.events.info("repl.command", command=cmd, argc=len(args_))
                 if cmd in ("/quit", "/exit"):
                     break
@@ -1141,8 +1172,16 @@ def main() -> None:
                 elif cmd == "/agent":
                     if not config.get("environment_id"):
                         print("Run /setup first.")
+                    elif rest:
+                        print(run_agent_task(client, config, rest))
                     else:
-                        print(run_agent_maintenance(client, config))
+                        # No instructions: start a session, so the agent can be
+                        # talked to across turns like the other two personas.
+                        session = CmaSession(client, config, Role.AGENT,
+                                             AGENT_IDENTITY)
+                        print(f"Agent session started (session {session.session_id}). "
+                              f"Type instructions, or /agent <instructions> for a "
+                              f"one-shot run.\nSuggested: {SUGGESTED_AGENT_TASK}")
                 else:
                     print(f"Unknown command '{cmd}'. Type /help.")
                 continue

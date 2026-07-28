@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- 2026-07-28: **`cma.py`'s `/agent` now takes instructions instead of running one hard-coded prompt.** `run_agent_maintenance` embedded a single triage instruction and `/agent` was the only caller, so the hosted AGENT persona could be asked exactly one thing. Replaced by `run_agent_task(client, config, instructions)`, which sends what the caller typed and nothing else.
+  - `/agent <text>` runs one instruction and prints the report, leaving the current session alone — the same one-shot shape as before. **Bare `/agent` now starts an AGENT session** rather than running the canned prompt, so the maintenance persona can be talked to across turns like ADJUSTER and INSURER. That is a behaviour change to the bare form, and it is what makes `/agent` consistent with the other two.
+  - The old prompt survives as `SUGGESTED_AGENT_TASK`, printed when a session starts. It is a suggestion, not a default: `run_agent_task` never substitutes it, so an empty instruction reaches the agent as given. There is a test for exactly that, because `send(instructions or SUGGESTED_AGENT_TASK)` is the obvious-looking mutation and any test passing a non-empty string misses it — the first version of that test did, and mutation testing caught it.
+  - New `split_command`, returning `(command, tokens, rest)`. Commands want different views: `/update-agents` needs tokens to find `--force`, `/agent` needs the prose exactly as typed. `rest` slices the original line rather than re-joining tokens, so an instruction's internal spacing survives — `" ".join(tokens)` would quietly collapse it. Extracting it from the REPL loop is also what makes any of this testable.
+  - `AGENT_IDENTITY` replaces the bare `"system"` literal, now that two call sites need it.
+  - The trace span is renamed `cma.maintenance` → `cma.agent_task`, since it is no longer only maintenance.
+  - 9 new tests (486 total). Mutation-checked: joining tokens for `rest`, reinstating the canned prompt as an `or` fallback, and changing the session identity each fail the intended test.
+
 ### Added
 - 2026-07-28: **`mcp_call.py` — call one MCP tool from the shell, with no model in the loop.** For seeding a demo, checking a deployment, or poking a single tool, where going through an agent is slow, expensive and non-deterministic. `python3 mcp_call.py agent generate_unassigned_incidents count=20`; `--list` shows a role's tools with their signatures.
   - **Drives a real `ClientSession` over `streamable_http_client`**, not a hand-rolled JSON-RPC POST. A raw POST would be shorter but would also succeed in cases where a real client fails — proper streamable-HTTP through the ingress is the entire reason this is hosted on Container Apps rather than Azure Functions, so a tool used to verify a deployment should exercise the part that can actually break.
