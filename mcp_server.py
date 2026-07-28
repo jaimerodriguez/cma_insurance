@@ -76,7 +76,7 @@ def endpoint_roles(role: Role) -> tuple[Role, ...]:
     (``roles.session_roles``), because a subagent's calls were cross-posted to the
     primary thread and dispatched against one client-side table. Over MCP a
     subagent is its own agent with its own ``mcp_servers``, so its calls arrive at
-    ``/mcp/adjuster`` and the AGENT endpoint can be exactly the 11 agent tools —
+    ``/mcp/adjuster`` and the AGENT endpoint can be exactly the 12 agent tools —
     which *recovers* the enforcement the union gave up.
 
     If a live run shows subagent calls arriving at the coordinator's endpoint

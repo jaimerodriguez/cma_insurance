@@ -16,12 +16,14 @@ Run with:  .venv/bin/python -m pytest tests/ -q
 from __future__ import annotations
 
 import copy
+import json
 from types import SimpleNamespace
 
 import pytest
 
 import cma
 import mcp_server
+import roles as roles_module
 from roles import Role
 
 
@@ -561,10 +563,45 @@ def test_mcp_mode_swaps_the_transport_not_the_contract(monkeypatch):
     can reach are the same 8 — they now live behind the endpoint."""
     monkeypatch.setattr(cma, "MCP", ON)
     tools_ = cma.agent_tools_for_role(Role.INSURER)
-    assert tools_ == [{"type": "mcp_toolset", "mcp_server_name": "insurance-insurer"}]
+    assert tools_ == [{
+        "type": "mcp_toolset", "mcp_server_name": "insurance-insurer",
+        "default_config": {"enabled": True,
+                           "permission_policy": {"type": "always_allow"}},
+    }]
     assert cma.mcp_servers_for_role(Role.INSURER) == [
         {"type": "url", "name": "insurance-insurer",
          "url": "https://x.example.com/mcp/insurer"}]
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_mcp_tool_calls_are_pre_authorised(monkeypatch, role):
+    """Unspecified, MCP tool calls default to per-call confirmation — an approval
+    prompt in the Anthropic console that stalls any unattended run, which is the
+    whole point of this backend. Custom tools never asked, so leaving this
+    unset would have changed behaviour silently when the transport switched."""
+    monkeypatch.setattr(cma, "MCP", ON)
+    toolsets = [t for t in cma.agent_tools_for_role(role)
+                if t["type"] == "mcp_toolset"]
+    assert toolsets, f"{role.value} has no mcp_toolset in MCP mode"
+    for ts in toolsets:
+        policy = ts.get("default_config", {}).get("permission_policy")
+        assert policy == {"type": "always_allow"}, (
+            f"{role.value} would prompt for approval on every tool call")
+
+
+def test_pre_authorisation_does_not_widen_the_role_surface(monkeypatch):
+    """always_allow pre-approves calls *within* a role's surface. Authorisation
+    still comes from the per-role endpoint, whose dispatch table refuses
+    anything outside it — the policy cannot reach across roles."""
+    monkeypatch.setattr(cma, "MCP", ON)
+    import mcp_server as ms
+    for role in Role:
+        served = {s["name"] for s in ms.tool_specs(role)}
+        assert served == roles_module.ROLE_TOOLS[role], (
+            f"{role.value} endpoint serves something other than its own tools")
+    agent_only = roles_module.ROLE_TOOLS[Role.AGENT] - roles_module.ROLE_TOOLS[Role.ADJUSTER]
+    assert agent_only, "expected at least one agent-only tool"
+    assert not (agent_only & {s["name"] for s in ms.tool_specs(Role.ADJUSTER)})
 
 
 def test_the_adjuster_keeps_its_prebuilt_toolset_in_mcp_mode(monkeypatch):
@@ -613,3 +650,185 @@ def test_seed_memory_is_text_not_a_tuple(adjuster_id):
     That silently produced a 4-tuple, which `memories.create(content=...)` rejects
     and which crashed `gen_cma_yaml.py`."""
     assert isinstance(cma._SEED_MEMORY[adjuster_id], str)
+
+
+# --- /agent taking instructions ---------------------------------------------
+
+@pytest.mark.parametrize("line,cmd,tokens,rest", [
+    ("/agent", "/agent", [], ""),
+    ("/agent   ", "/agent", [], ""),
+    ("/agent close the stale claims", "/agent", ["close", "the", "stale", "claims"],
+     "close the stale claims"),
+    ("/update-agents adjuster --force", "/update-agents", ["adjuster", "--force"],
+     "adjuster --force"),
+    ("/adjuster jaime", "/adjuster", ["jaime"], "jaime"),
+])
+def test_split_command_gives_both_views_of_the_arguments(line, cmd, tokens, rest):
+    assert cma.split_command(line) == (cmd, tokens, rest)
+
+
+def test_split_command_preserves_spacing_inside_an_instruction():
+    """`" ".join(tokens)` would collapse it. Instructions are prose sent verbatim
+    to a model, so the author's line breaks and spacing are theirs to keep."""
+    _, _, rest = cma.split_command("/agent Triage claim-1.  Then  report back.")
+    assert rest == "Triage claim-1.  Then  report back."
+
+
+def test_run_agent_task_sends_exactly_the_instructions_given(monkeypatch):
+    """The whole point of the change: no hard-coded prompt between the caller
+    and the agent."""
+    sent = {}
+
+    class _FakeSession:
+        def __init__(self, client, config, role, identity):
+            sent["role"], sent["identity"] = role, identity
+
+        def send(self, text):
+            sent["text"] = text
+            return "report"
+
+    monkeypatch.setattr(cma, "CmaSession", _FakeSession)
+    out = cma.run_agent_task(None, _CONFIG, "Close everything resolved over a week ago.")
+
+    assert out == "report"
+    assert sent["text"] == "Close everything resolved over a week ago."
+    assert sent["role"] is Role.AGENT
+    assert sent["identity"] == cma.AGENT_IDENTITY
+
+
+def test_the_suggested_task_is_a_suggestion_not_a_default(monkeypatch):
+    """It used to be the only thing /agent could do. It must not sneak back in as
+    a fallback — an empty instruction should reach the agent as given, not be
+    silently replaced."""
+    sent = {}
+
+    class _FakeSession:
+        def __init__(self, *a):
+            pass
+
+        def send(self, text):
+            sent["text"] = text
+            return ""
+
+    monkeypatch.setattr(cma, "CmaSession", _FakeSession)
+
+    # The empty string is the case that matters. `send(instructions or
+    # SUGGESTED_AGENT_TASK)` is the obvious-looking mutation, and any test that
+    # passes a non-empty instruction never triggers it.
+    cma.run_agent_task(None, _CONFIG, "")
+    assert sent["text"] == "", (
+        "an empty instruction was silently replaced with the canned prompt")
+
+    cma.run_agent_task(None, _CONFIG, "just do the routing")
+    assert sent["text"] == "just do the routing"
+
+
+def test_help_documents_both_agent_forms():
+    assert "/agent <text>" in cma._HELP
+    assert "/agent  " in cma._HELP        # the bare, session-starting form
+
+
+# --- diagnosability of a rejected tool-result batch -------------------------
+#
+# A live run failed with `tool_use_id "sevt_..." does not match any
+# custom_tool_use event in this session`, and the trace could not explain it:
+# `cma.idle` recorded only how many ids the session was blocked on, not which,
+# and nothing recorded which ids we then answered. The wire log does not capture
+# SSE response bodies, so the ids were unrecoverable after the fact. These pin
+# the fields that make that diagnosable.
+
+def _traced_send(role, config, legs, monkeypatch, tmp_path):
+    """Run a scripted send inside a real Observability run and return its events."""
+    from agent_obs import ObsConfig, Observability
+
+    cfg = ObsConfig(var_dir=tmp_path, enabled=True)
+    with Observability.start(cfg, front_end="t"):
+        _run_send(role, config, legs, monkeypatch)
+    return [json.loads(line)
+            for path in sorted(tmp_path.rglob("*.events.jsonl"))
+            for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_the_idle_event_records_which_ids_not_just_how_many(in_sync, monkeypatch,
+                                                            tmp_path):
+    rows = _traced_send(Role.AGENT, in_sync[1], [
+        [_call("sevt_1"), _call("sevt_2"), _idle("sevt_1", "sevt_2")],
+        [_idle(stop="end_turn")],
+    ], monkeypatch, tmp_path)
+
+    idles = [r for r in rows if r.get("event") == "cma.idle"]
+    assert idles, "no cma.idle event recorded"
+    first = idles[0]
+    assert first["event_ids"] == ["sevt_1", "sevt_2"], (
+        "the blocking ids must be in the trace — a count cannot be compared "
+        "against what we answered")
+    assert first["collected"] == ["sevt_1", "sevt_2"]
+
+
+def test_the_answered_ids_and_their_threads_are_recorded(in_sync, monkeypatch,
+                                                         tmp_path):
+    """A subagent's call is answered differently from the coordinator's own, so
+    the thread has to be in the record when a batch is rejected."""
+    sub = _Ev(type="agent.custom_tool_use", id="sevt_sub", name="list_incidents",
+              input={}, session_thread_id="sthr_9")
+    rows = _traced_send(Role.AGENT, in_sync[1], [
+        [_call("sevt_own"), sub, _idle("sevt_own", "sevt_sub")],
+        [_idle(stop="end_turn")],
+    ], monkeypatch, tmp_path)
+
+    results = [r for r in rows if r.get("event") == "cma.tool_results"]
+    assert results, "nothing recorded which ids were answered"
+    assert results[0]["ids"] == ["sevt_own", "sevt_sub"]
+    assert results[0]["threads"] == ["-", "sthr_9"], (
+        "the thread each answered call belongs to must be visible")
+
+
+# --- delegation prompt: spawn late, brief completely ------------------------
+#
+# Measured from run cma-20260728-130639-e08f6d: the first subagent was spawned
+# 10% into the run and then averaged 3 round trips each, because the coordinator
+# delegated before triage was finished and the adjuster had to ask for what it
+# was missing. These pin the instructions that address that.
+
+def _agent_prompt() -> str:
+    return roles_module.build_system_prompt(
+        Role.AGENT, "system",
+        delegate_agents=[("adjuster-jaime", "handles jaime's claims")])
+
+
+def test_delegation_waits_until_triage_is_done():
+    """The old text said 'once a claim has an adjuster ... delegate it', which
+    reads as a per-claim trigger and is why subagents started 10% into a run."""
+    p = _agent_prompt()
+    assert "before you launch a single subagent" in p
+    assert "one task per adjuster" in p
+    assert "never one\ntask per claim" in p or "never one task per claim" in p
+
+
+def test_the_delegation_brief_enumerates_what_the_adjuster_needs():
+    """A thin brief is what forces the adjuster to message back."""
+    p = _agent_prompt()
+    assert "A brief is complete when the adjuster needs nothing further" in p
+    for required in ("the claim id", "authorization band", "VIP status"):
+        assert required in p, f"brief spec no longer mentions {required!r}"
+
+
+def test_the_adjuster_is_told_not_to_ask_the_coordinator_to_confirm():
+    """`Always confirm before denying a claim or approving many at once` was
+    unconditional, so every delegated batch cost a confirmation round trip. It
+    has to stay for interactive sessions and go for delegated ones."""
+    p = roles_module.build_system_prompt(Role.ADJUSTER, "jaime")
+    assert "its brief is your authorization" in p
+    assert "Do not ask it to confirm" in p
+    # The interactive rule survives, now scoped.
+    assert "working with a person" in p
+    assert "confirm before\ndenying a claim" in p or "confirm before denying a claim" in p
+
+
+def test_the_adjuster_is_told_to_look_things_up_itself():
+    p = roles_module.build_system_prompt(Role.ADJUSTER, "jaime")
+    assert "anything you\ncan establish yourself" in p or "anything you can establish yourself" in p
+    for tool in ("get_incident_details", "find_insurer", "find_policy"):
+        assert tool in p, f"{tool} not offered as a self-serve alternative"
+        assert tool in roles_module.ROLE_TOOLS[Role.ADJUSTER], (
+            f"prompt tells the adjuster to use {tool}, which its role cannot call")

@@ -8,6 +8,7 @@ per-id lookups and workflow on top.
 """
 
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
@@ -25,8 +26,12 @@ from data_entities import (
     policy_from_dict,
 )
 
-# JSON stores live in the data/ subfolder next to this module.
-DATA_DIR = Path(__file__).parent / "data"
+# JSON stores live in the data/ subfolder next to this module, unless
+# ``CLAIMS_DATA_DIR`` relocates them. That override exists for one reason: a
+# container image is read-only, so a deployment that needs writes to survive a
+# restart must point this at a mounted volume (see ACA_Deploy.md). Read once at
+# import, so tests can keep patching the module globals directly.
+DATA_DIR = Path(os.environ.get("CLAIMS_DATA_DIR") or Path(__file__).parent / "data")
 INCIDENTS_FILE = DATA_DIR / "incidents.json"
 ADJUSTERS_FILE = DATA_DIR / "adjusters.json"
 INSURERS_FILE = DATA_DIR / "insurers.json"
@@ -61,6 +66,17 @@ def save_incident(incident: Incident) -> None:
     """Persist a single incident, inserting or updating it by its id."""
     incidents = load_incidents()
     incidents[incident.id] = incident
+    _write_incidents(incidents)
+
+
+def replace_incidents(incidents: dict[str, Incident]) -> None:
+    """Overwrite ``incidents.json`` wholesale, discarding everything already there.
+
+    A public, deliberately blunt name for ``_write_incidents``. Every other
+    writer here is read-modify-write and preserves the rest of the file; this one
+    does not, so the call site should have to say the destructive word out loud.
+    Used by ``tools.generate_unassigned_incidents`` to reset the claim set.
+    """
     _write_incidents(incidents)
 
 

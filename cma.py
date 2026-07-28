@@ -132,8 +132,32 @@ def mcp_tools_for_role(role: Role) -> list[dict]:
     No per-tool ``configs``: the endpoint URL already decides what exists, so
     filtering here would be a second, advisory copy of the same allow-list that
     would need regenerating on every tool change.
+
+    ``always_allow`` is set deliberately. Left unspecified, MCP tool calls
+    default to requiring per-call confirmation, which surfaces as an approval
+    prompt in the Anthropic console and stalls any unattended run — the exact
+    thing this backend exists to make possible. Custom tools never asked, so
+    this restores the behaviour the MCP switch would otherwise have changed
+    silently.
+
+    What that does *not* do is widen what the agent can reach. Authorisation
+    still comes from the per-role endpoint: ``/mcp/adjuster`` cannot execute an
+    agent tool no matter what policy is set here, because the server's dispatch
+    table refuses it. This pre-approves calls within a role's surface, not
+    across roles.
+
+    ``enabled`` is sent explicitly rather than relying on its default, so the
+    value we send is the value the API echoes back and ``_tools_match`` does not
+    see a server-filled field as drift on every run.
     """
-    return [{"type": "mcp_toolset", "mcp_server_name": mcp_server.server_name(role)}]
+    return [{
+        "type": "mcp_toolset",
+        "mcp_server_name": mcp_server.server_name(role),
+        "default_config": {
+            "enabled": True,
+            "permission_policy": {"type": "always_allow"},
+        },
+    }]
 
 
 def mcp_servers_for_role(role: Role) -> list[dict]:
@@ -895,11 +919,15 @@ class CmaSession:
                             stop = getattr(event, "stop_reason", None)
                             stop_type = getattr(stop, "type", None)
                             blocked_on = list(getattr(stop, "event_ids", None) or [])
-                            # Logged at info: without it the events log cannot tell
-                            # "idle, waiting on us" from "idle, done" after the fact,
-                            # which is what made this stall hard to see.
+                            # The ids, not just how many. Logging only the count
+                            # meant a later failure — the session naming ids we
+                            # never collected, or us answering ids it never named
+                            # — could not be diagnosed from the trace at all, and
+                            # the wire log does not capture SSE response bodies.
                             obs.events.info("cma.idle", stop=stop_type,
-                                            blocked_on=len(blocked_on))
+                                            blocked_on=len(blocked_on),
+                                            event_ids=blocked_on,
+                                            collected=[c.id for c in tool_calls])
                             if stop_type != "requires_action":
                                 terminated = False
                                 break
@@ -918,6 +946,15 @@ class CmaSession:
                 if terminated or not tool_calls:
                     break
                 to_send = [self._tool_result(call) for call in tool_calls]
+                # What we are about to answer, and on whose behalf. A subagent's
+                # call carries a thread id and is answered differently from the
+                # coordinator's own; when a batch is rejected, this is the record
+                # of exactly which ids and which threads were in it.
+                obs.events.info(
+                    "cma.tool_results", count=len(to_send),
+                    ids=[c.id for c in tool_calls],
+                    threads=sorted({getattr(c, "session_thread_id", None) or "-"
+                                    for c in tool_calls}))
 
             obs.record_turn(span, obs.usage.from_cma_usage(
                 usage, session_id=self.session_id,
@@ -930,13 +967,43 @@ class CmaSession:
         return "".join(text_parts).strip()
 
 
-@agent_obs.trace_callable("cma.maintenance", kind="maintenance")
-def run_agent_maintenance(client, config: dict) -> str:
-    """Run the maintenance persona as a CMA session and return its report."""
-    session = CmaSession(client, config, Role.AGENT, "system")
-    return session.send(
-        "Process all the unassigned claims. Auto approve as many as you can. Delegate to adjusters as needed, then report back the summary on all actions performed."         
-    )
+# Identity the AGENT persona runs under. Unlike ADJUSTER and INSURER, whose
+# identity is a real record id, the maintenance persona is not a person.
+AGENT_IDENTITY = "system"
+
+# Offered by `/agent` as a starting point rather than hard-wired into it. It was
+# the only thing `/agent` could ever do; keeping it as a suggestion means the
+# common run is still one keystroke away without being the only option.
+SUGGESTED_AGENT_TASK = (
+    "Process all the unassigned claims. Auto approve as many as you can. "
+    "Delegate to adjusters as needed, then report back the summary on all "
+    "actions performed."
+)
+
+
+def split_command(line: str) -> tuple[str, list[str], str]:
+    """Split a REPL line into ``(command, tokens, rest)``.
+
+    Two views of the arguments because the commands want different things:
+    ``/update-agents`` wants tokens to pick flags out of, while ``/agent`` wants
+    the prose exactly as typed. Deriving ``rest`` by slicing the original line
+    rather than ``" ".join(tokens)`` is what preserves the author's spacing.
+    """
+    tokens = line.split()
+    command = tokens[0]
+    return command, tokens[1:], line[len(command):].strip()
+
+
+@agent_obs.trace_callable("cma.agent_task", kind="maintenance")
+def run_agent_task(client, config: dict, instructions: str) -> str:
+    """Run one instruction through a fresh AGENT session and return its report.
+
+    One-shot: the session is created, used and dropped, so the REPL's current
+    session is left alone. For a conversation with the agent, bare ``/agent``
+    starts a session instead.
+    """
+    session = CmaSession(client, config, Role.AGENT, AGENT_IDENTITY)
+    return session.send(instructions)
 
 
 # --- REPL -------------------------------------------------------------------
@@ -948,7 +1015,9 @@ _HELP = """Commands:
                      agents (add a role to limit it, `--force` to update anyway)
   /adjuster <name>   start an adjuster session (by user_id), e.g. /adjuster jaime
   /insurer <id>      start a policyholder session (by insurer id), e.g. /insurer ins-1001
-  /agent             run the maintenance agent now (close stale resolved claims)
+  /agent <text>      run one instruction through the maintenance agent and print
+                     its report (one-shot; the current session is left alone)
+  /agent             start an agent session, then type instructions freely
   /whoami            show the current role
   /obs               observability status (add `tail [n]` or `stats [by]`)
   /help              show this help
@@ -1066,6 +1135,11 @@ def main() -> None:
         def prompt() -> str:
             return f"({session.role.value}:{session.identity})> " if session else "(no session)> "
 
+        # Separate history file from repl.py's: the two REPLs have different
+        # commands, so sharing one would fill each with the other's misses.
+        from repl import enable_line_editing
+        enable_line_editing("cma")
+
         while True:
             try:
                 line = input(prompt()).strip()
@@ -1076,8 +1150,7 @@ def main() -> None:
                 continue
 
             if line.startswith("/"):
-                parts = line.split()
-                cmd, args_ = parts[0], parts[1:]
+                cmd, args_, rest = split_command(line)
                 obs.events.info("repl.command", command=cmd, argc=len(args_))
                 if cmd in ("/quit", "/exit"):
                     break
@@ -1141,8 +1214,16 @@ def main() -> None:
                 elif cmd == "/agent":
                     if not config.get("environment_id"):
                         print("Run /setup first.")
+                    elif rest:
+                        print(run_agent_task(client, config, rest))
                     else:
-                        print(run_agent_maintenance(client, config))
+                        # No instructions: start a session, so the agent can be
+                        # talked to across turns like the other two personas.
+                        session = CmaSession(client, config, Role.AGENT,
+                                             AGENT_IDENTITY)
+                        print(f"Agent session started (session {session.session_id}). "
+                              f"Type instructions, or /agent <instructions> for a "
+                              f"one-shot run.\nSuggested: {SUGGESTED_AGENT_TASK}")
                 else:
                     print(f"Unknown command '{cmd}'. Type /help.")
                 continue

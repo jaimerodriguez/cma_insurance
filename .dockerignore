@@ -1,0 +1,30 @@
+# Everything not needed by the MCP server. The Dockerfile COPYs an explicit
+# allowlist, so this is defence in depth — but .env and var/ are listed because
+# a stray `COPY . .` during a future edit must not ship secrets or traces.
+.env
+.env.*
+var/
+tests/
+docs/
+.venv/
+.git/
+.github/
+.vscode/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Client-side entry points — these talk to Anthropic from your machine.
+cma.py
+cma/
+gen_cma_yaml.py
+manual_setup.py
+
+# Test fixtures, not stores.
+data/synthetic-incidents-*.json
+data/incidents-original.json
+data/cma_config.json
+
+agent_tools_schema.json
+requirements.txt
+requirements-dev.txt

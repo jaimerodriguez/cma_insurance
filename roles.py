@@ -22,12 +22,14 @@ The tool allow-lists below reference functions by name from
 
 import json
 from collections.abc import Iterable, Sequence
+from dataclasses import asdict
 from enum import Enum
 from typing import Any, Callable
 
 import agent_memory
 import agent_schemas
 import tools
+from data_entities import DynamicPolicies
 
 
 class Role(str, Enum):
@@ -61,6 +63,10 @@ ROLE_TOOLS: dict[Role, set[str]] = {
         "append_insurer_history", "append_insurer_preferences",
     },
     Role.AGENT: {
+        # AGENT only. It wipes and regenerates the whole claim set, which is a
+        # setup operation, not claims work — an adjuster must never be able to
+        # discard the claims it is being asked to handle.
+        "generate_unassigned_incidents",
         "close_stale_resolved", "list_incidents", "get_incident_details", "update_status",
         "process_incident", "assign_incident", "escalate_to_management",
         "find_adjuster", "list_adjusters", "get_adjuster_details",
@@ -106,7 +112,7 @@ def tools_for_role(spec: RoleSpec) -> list[Callable[..., Any]]:
     return [fn for fn in tools.AGENT_TOOLS if fn.__name__ in allowed]
 
 
-def schemas_for_role(spec: RoleSpec) -> list[dict]:
+def schemas_for_role(spec: RoleSpec) -> list[agent_schemas.ToolSchema]:
     """Return the Anthropic tool schemas for the tools this role (or roles) may call."""
     allowed = allowed_tool_names(spec)
     return [s for s in agent_schemas.build_tool_schemas() if s["name"] in allowed]
@@ -145,8 +151,15 @@ When you call process_incident or escalate_incident, pass this exact object as t
 Whether a policyholder is "upset" is your judgement — read the incident and the
 insurer's history and pass insurer_upset=true/false to process_incident accordingly.
 
-Always confirm before denying a claim or approving many at once. Report what you did
-concisely."""
+When another agent delegates work to you, its brief is your authorization: act on
+it and report back. Do not ask it to confirm, and do not ask it for anything you
+can establish yourself — get_incident_details, find_insurer, find_policy and
+list_incidents are yours to use. Message back only when a claim is genuinely not
+actionable: it is assigned to a different adjuster, already resolved, or the
+record is missing. When you are working with a person instead, confirm before
+denying a claim or approving many at once.
+
+Report what you did concisely."""
 
 _INSURER_PROMPT = """You are an AI assistant speaking directly with policyholder \
 {name} (insurer id: "{insurer_id}"). You represent the insurance company to this customer.
@@ -210,13 +223,28 @@ You have one subagent per adjuster, launched with the Agent tool:
 
 {roster}
 
-Your job is to triage, autoapprove, and route (or assign to adjusters). 
-Once a claim has an adjuster, the *decision* is
-that adjuster's — delegate it rather than resolving it yourself.  
-After you are done triaging and routing to adjusters, 
-invoke each adjuster via their own subagent in a single task, not one task per claim,
-and give it the claim ids plus anything you learned that they might not infer directly from the claim. 
- 
+Your job is to triage, autoapprove, and route (or assign to adjusters). Once a
+claim has an adjuster, the *decision* is that adjuster's — delegate it rather
+than resolving it yourself.
+
+**Finish triaging and routing every claim before you launch a single subagent.**
+This is the most common way this goes wrong: you delegate as soon as one claim is
+routed, the adjuster starts without context you have not worked out yet, and the
+two of you spend several rounds messaging back and forth instead of working.
+Triage is cheap and local; a round trip with a subagent is neither.
+
+Then one task per adjuster, covering all of that adjuster's claims — never one
+task per claim.
+
+A brief is complete when the adjuster needs nothing further from you. For every
+claim you hand over, include:
+- the claim id,
+- what triage already established: estimated cost, the authorization band it
+  fell into, and why it routed to this adjuster,
+- anything about the policyholder that is not in the claim record — prior
+  complaints, VIP status, an upset caller,
+- what you want back: a decision per claim.
+
 Delegate for: approving, denying, escalating to management, notifying, and logging
 notes on a claim that has an assigned adjuster.
 
@@ -224,9 +252,9 @@ Do NOT delegate for: routing and assignment (yours), close_stale_resolved (yours
 or a claim that is already resolved. Never send a claim to an adjuster other than
 the one it is assigned to.
 
-Launch the subagents you need in a single message, but don't run adjusters concurrently; run them sequentially.  
-Thencollect their reports and fold them into your own summary — say what each adjuster
-decided, not just that you delegated."""
+Run adjusters one at a time, not concurrently. Then collect their reports and fold
+them into your own summary — say what each adjuster decided, not just that you
+delegated."""
 
 
 def build_system_prompt(role: Role, identity_id: str, extra: str = "",
@@ -271,7 +299,6 @@ def build_system_prompt(role: Role, identity_id: str, extra: str = "",
     return f"{prompt}\n\n{extra.strip()}" if extra.strip() else prompt
 
 
-def _policies_dict(policies) -> dict[str, Any]:
+def _policies_dict(policies: DynamicPolicies) -> dict[str, Any]:
     """The DynamicPolicies fields as a plain dict for the prompt / tool argument."""
-    from dataclasses import asdict
     return asdict(policies)

@@ -1,0 +1,28 @@
+# Runtime dependencies for the containerised MCP tool server (mcp_server.py).
+#
+# Deliberately *not* `-r requirements.txt`: the server needs neither the Claude
+# Agent SDK nor the `anthropic` client. Both are client-side — they belong to
+# repl.py and cma.py, which stay on your machine. repl.py is in the image only
+# because mcp_server.py imports `_dispatch` from it, and its `claude_agent_sdk`
+# imports are function-local, so they never fire here.
+#
+# Keeping this list separate is what holds the image small and its attack
+# surface narrow. If you add a dependency to requirements.txt, it does not
+# silently become part of the deployed server.
+
+mcp>=1.28.0
+starlette>=1.3.0
+uvicorn>=0.51.0
+
+# Imported directly by mcp_server._validation_error. Arrives transitively via
+# `mcp` today, but a direct import deserves a direct pin.
+jsonschema>=4.20
+
+# mcp_server.main() calls load_dotenv() so a .env can be bind-mounted for local
+# `docker run`. In Azure the values come from the container app's env vars.
+python-dotenv>=1.2.2
+
+# Optional: without it agent_obs degrades to a no-op tracer and the event log,
+# wire capture, and usage ledger all still work. Kept because a remote server
+# you cannot attach a debugger to is exactly where traces earn their cost.
+opentelemetry-sdk>=1.44.0
