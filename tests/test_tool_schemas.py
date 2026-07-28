@@ -67,7 +67,10 @@ def _policies_from_prompt(adjuster_id: str = "jaime") -> dict:
     obeys, so the prompt is what has to be checked.
     """
     prompt = roles.build_system_prompt(roles.Role.ADJUSTER, adjuster_id)
-    marker = "policies for this adjuster"
+    # Anchored on the phrase that introduces the object, not on a full
+    # sentence: the wording around it is prose and will be edited.
+    marker = "auto-approval policies"
+    assert marker in prompt, "prompt no longer introduces the policies object"
     start = prompt.index("{", prompt.index(marker))
     obj, _ = json.JSONDecoder().raw_decode(prompt[start:])
     return obj
