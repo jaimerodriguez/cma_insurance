@@ -32,11 +32,17 @@ COPY data/adjusters.json data/incidents.json data/insurers.json \
 # empty world that looks like a working server.
 RUN cp -r ./data ./seed
 
-COPY --chmod=755 entrypoint.sh ./
+# Plain COPY plus an explicit chmod below, not `COPY --chmod=755`: that flag is
+# BuildKit-only, and `az acr build` runs on the classic Docker builder, which
+# fails the step outright. Do not reintroduce it — a local `docker build` with
+# BuildKit on will happily accept it and the break only shows up in Azure.
+COPY entrypoint.sh ./
 
 # Non-root. `data` must stay writable: with no volume mounted the tools write
 # straight into the image's writable layer, which is the default deployment.
-RUN useradd --create-home --uid 10001 app && chown -R app:app /app/data
+RUN useradd --create-home --uid 10001 app \
+    && chmod 755 /app/entrypoint.sh \
+    && chown -R app:app /app/data
 USER app
 
 # 0.0.0.0, not McpConfig's 127.0.0.1 default: a loopback bind is unreachable

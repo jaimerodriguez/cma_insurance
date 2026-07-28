@@ -152,6 +152,39 @@ def test_every_direct_third_party_import_is_declared_in_the_mcp_requirements():
         f"requirements-mcp.txt — the container will fail on import.")
 
 
+# Dockerfile syntax the BuildKit frontend accepts and the classic builder does
+# not. `az acr build` runs ACR Tasks, which uses the classic builder, so any of
+# these fails the build in Azure while a local `docker build` with BuildKit
+# enabled (the default on Docker Desktop) succeeds — the worst kind of drift,
+# because the fast feedback loop is the one that lies. `COPY --chmod=755` cost a
+# real deploy; the rest are here so the next one does not.
+_BUILDKIT_ONLY = (
+    ("--chmod=", "COPY --chmod is BuildKit-only; use a separate `RUN chmod`"),
+    ("--mount=", "RUN --mount is BuildKit-only"),
+    ("--link", "COPY --link is BuildKit-only"),
+    ("# syntax=", "a syntax directive selects a BuildKit frontend"),
+    ("<<EOF", "heredoc syntax is BuildKit-only"),
+)
+
+
+def test_dockerfile_avoids_buildkit_only_syntax():
+    text = DOCKERFILE.read_text()
+    instructions = "\n".join(
+        line for line in text.replace("\\\n", " ").splitlines()
+        if line.strip() and not line.strip().startswith("#"))
+    found = [why for token, why in _BUILDKIT_ONLY if token in instructions]
+    assert not found, (
+        f"Dockerfile uses BuildKit-only syntax that `az acr build` rejects: {found}")
+
+
+def test_the_entrypoint_is_made_executable_in_the_image():
+    """It is the ENTRYPOINT, so a missing exec bit is a container that will not
+    start. With `COPY --chmod` unavailable this has to be an explicit chmod, and
+    relying on the checked-in file mode would break on a Windows checkout."""
+    text = DOCKERFILE.read_text().replace("\\\n", " ")
+    assert "chmod 755 /app/entrypoint.sh" in text or "chmod +x /app/entrypoint.sh" in text
+
+
 def test_claims_data_dir_relocates_every_storage_path():
     """The override must reach the file constants, not just ``DATA_DIR``.
 

@@ -336,6 +336,23 @@ keep them, either add a second volume mount for `OBS_VAR_DIR` or leave
 
 ## 10. Troubleshooting
 
+**`az acr build` fails with "the --chmod option requires BuildKit".**
+ACR Tasks builds with the **classic** Docker builder, not BuildKit, so
+BuildKit-only syntax (`COPY --chmod`, `RUN --mount`, `COPY --link`, heredocs, a
+`# syntax=` directive) fails there while a local `docker build` accepts it —
+Docker Desktop enables BuildKit by default. The Dockerfile here is written for
+the classic builder and `tests/test_deploy.py` fails if that regresses. If you
+add a step that genuinely needs BuildKit, build and push it yourself instead:
+
+```bash
+docker buildx build --platform linux/amd64 -t $ACR.azurecr.io/$IMAGE .
+az acr login --name $ACR && docker push $ACR.azurecr.io/$IMAGE
+```
+
+`--platform linux/amd64` matters on an Apple-silicon Mac: Container Apps runs
+x86-64, and an arm64 image fails at startup with an exec-format error rather
+than at build time.
+
 **Container exits immediately, logs show `MCP_BEARER_TOKEN is unset`.**
 Working as designed — the server refuses to serve the claims tools
 unauthenticated. The `secretref:` wiring is wrong; check

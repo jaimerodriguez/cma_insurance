@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- 2026-07-27: **`az acr build` failed at step 10/16 with "the --chmod option requires BuildKit".** The Dockerfile used `COPY --chmod=755 entrypoint.sh ./`, which is BuildKit-only syntax; ACR Tasks builds with the **classic** Docker builder and rejects it outright. Replaced with a plain `COPY` plus an explicit `chmod 755` folded into the existing `useradd` layer — no extra layer, works on both builders.
+  - **This is the failure mode the local feedback loop cannot see.** Docker Desktop enables BuildKit by default, so `docker build` would have accepted the flag and only Azure would have broken. Two tests now close that gap: one rejects BuildKit-only syntax in the Dockerfile (`--chmod`, `RUN --mount`, `COPY --link`, heredocs, a `# syntax=` directive), and one asserts the entrypoint is explicitly made executable — with `COPY --chmod` unavailable, relying on the checked-in file mode would break on a Windows checkout, and a non-executable ENTRYPOINT is a container that will not start. Mutation-checked against all three: reintroducing `--chmod`, dropping the `chmod`, and adding a `RUN --mount` each fail the intended test.
+  - `ACA_Deploy.md` gains a troubleshooting entry, including the `docker buildx` fallback for a step that genuinely needs BuildKit — with `--platform linux/amd64`, since Container Apps runs x86-64 and an arm64 image built on an Apple-silicon Mac fails at startup with an exec-format error rather than at build time.
+
 ### Changed
 - 2026-07-27: **Type annotations cleaned up in `agent_schemas.py`, `roles.py` and `repl.py`** — all three now report zero Pylance diagnostics in strict mode, as do `tools.py`, `storage.py` and `mcp_server.py`. No runtime behaviour changes; 440 tests pass unchanged.
   - **The root cause was `agent_schemas`' bare `dict` returns**, which pyright widens to `dict[Unknown, Unknown]` and which then propagated "partially unknown" through every caller — `roles.schemas_for_role`, and from there into `repl.py` twice. Two aliases, `JsonSchema` and `ToolSchema`, replace them; fixing the one module took `repl.py` from **15 diagnostics to 5** on its own, which is the measure of how far the bare `dict` was reaching.
