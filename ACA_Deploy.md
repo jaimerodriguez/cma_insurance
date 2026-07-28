@@ -319,6 +319,30 @@ az containerapp update -n $APP -g $RG --yaml app.yaml
 file, and never overwrites an existing one — a restart tops up a partially
 populated volume rather than resetting a live world.
 
+**The share must be writable by uid 10001.** The container starts as root, seeds,
+`chown`s the data directory, then drops to that uid with `setpriv` before
+serving. `chown` is refused on SMB, which is what an Azure Files mount is, so
+the mount itself has to grant access — set `mountOptions` on the storage
+definition:
+
+```yaml
+    volumes:
+    - name: claims-data
+      storageName: claimsdata
+      storageType: AzureFile
+      mountOptions: uid=10001,gid=10001,file_mode=0777,dir_mode=0777
+```
+
+If it is not writable the container **exits immediately** with
+`FATAL: /data is not writable by uid 10001` rather than starting and failing on
+every tool call, which would read as a bug in the tools rather than a bad mount.
+
+> Verified locally against a Docker named volume — seeding, the privilege drop,
+> persistence across a restart, and the read-only failure path. **Not yet
+> verified against a real Azure Files mount**, which is where the `mountOptions`
+> line above matters; if the container exits with that FATAL, that line is what
+> to adjust.
+
 Two consequences worth knowing before you choose this:
 
 - **Azure Files is SMB.** `storage.py` rewrites whole JSON files on every

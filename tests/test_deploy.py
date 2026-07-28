@@ -10,6 +10,7 @@ overwrites a live volume. See ACA_Deploy.md.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -175,6 +176,35 @@ def test_dockerfile_avoids_buildkit_only_syntax():
     found = [why for token, why in _BUILDKIT_ONLY if token in instructions]
     assert not found, (
         f"Dockerfile uses BuildKit-only syntax that `az acr build` rejects: {found}")
+
+
+def test_the_image_drops_privileges_in_the_entrypoint_not_via_USER():
+    """A `USER app` line would look like a security improvement and is actually
+    a crash: a mounted volume arrives owned by root, so an already-dropped
+    process cannot seed it and the container loops on `cp: Permission denied`.
+    Verified against a real volume mount before this test was written."""
+    text = DOCKERFILE.read_text().replace("\\\n", " ")
+    user_lines = [line for line in text.splitlines()
+                  if line.strip().startswith("USER ")]
+    assert not user_lines, (
+        f"{user_lines} — drop privileges in entrypoint.sh with setpriv instead, "
+        f"so seeding still runs as root.")
+
+    # Fold shell line continuations — the exec is wrapped across two lines.
+    entry = ENTRYPOINT.read_text().replace("\\\n", " ")
+    assert "setpriv" in entry, "entrypoint must drop privileges before serving"
+    assert "--reuid=" in entry and "--regid=" in entry
+    # The drop must be the exec'd command, not merely mentioned.
+    assert re.search(r"^exec setpriv .*python mcp_server\.py", entry, re.M), (
+        "the served process must be the unprivileged one")
+
+
+def test_the_entrypoint_refuses_an_unwritable_data_dir():
+    """Otherwise every tool call returns a permission error deep into a run,
+    which reads as a bug in the tools rather than a bad mount."""
+    entry = ENTRYPOINT.read_text()
+    assert "not writable by uid" in entry
+    assert "exit 1" in entry
 
 
 def test_the_entrypoint_is_made_executable_in_the_image():

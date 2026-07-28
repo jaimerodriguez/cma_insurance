@@ -38,12 +38,14 @@ RUN cp -r ./data ./seed
 # BuildKit on will happily accept it and the break only shows up in Azure.
 COPY entrypoint.sh ./
 
-# Non-root. `data` must stay writable: with no volume mounted the tools write
-# straight into the image's writable layer, which is the default deployment.
+# The unprivileged account the server actually runs as. Deliberately no
+# `USER app` here: the container starts as root and `entrypoint.sh` drops to
+# this uid with `setpriv` after seeding. A mounted volume arrives owned by root,
+# so an image that had already dropped privileges could not seed it and
+# crash-looped on `cp: Permission denied`. Seeding needs root; serving does not.
 RUN useradd --create-home --uid 10001 app \
     && chmod 755 /app/entrypoint.sh \
     && chown -R app:app /app/data
-USER app
 
 # 0.0.0.0, not McpConfig's 127.0.0.1 default: a loopback bind is unreachable
 # from outside the container and the health probe would fail with no clue why.
