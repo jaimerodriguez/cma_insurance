@@ -23,6 +23,7 @@ import pytest
 
 import cma
 import mcp_server
+import roles as roles_module
 from roles import Role
 
 
@@ -562,10 +563,45 @@ def test_mcp_mode_swaps_the_transport_not_the_contract(monkeypatch):
     can reach are the same 8 — they now live behind the endpoint."""
     monkeypatch.setattr(cma, "MCP", ON)
     tools_ = cma.agent_tools_for_role(Role.INSURER)
-    assert tools_ == [{"type": "mcp_toolset", "mcp_server_name": "insurance-insurer"}]
+    assert tools_ == [{
+        "type": "mcp_toolset", "mcp_server_name": "insurance-insurer",
+        "default_config": {"enabled": True,
+                           "permission_policy": {"type": "always_allow"}},
+    }]
     assert cma.mcp_servers_for_role(Role.INSURER) == [
         {"type": "url", "name": "insurance-insurer",
          "url": "https://x.example.com/mcp/insurer"}]
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_mcp_tool_calls_are_pre_authorised(monkeypatch, role):
+    """Unspecified, MCP tool calls default to per-call confirmation — an approval
+    prompt in the Anthropic console that stalls any unattended run, which is the
+    whole point of this backend. Custom tools never asked, so leaving this
+    unset would have changed behaviour silently when the transport switched."""
+    monkeypatch.setattr(cma, "MCP", ON)
+    toolsets = [t for t in cma.agent_tools_for_role(role)
+                if t["type"] == "mcp_toolset"]
+    assert toolsets, f"{role.value} has no mcp_toolset in MCP mode"
+    for ts in toolsets:
+        policy = ts.get("default_config", {}).get("permission_policy")
+        assert policy == {"type": "always_allow"}, (
+            f"{role.value} would prompt for approval on every tool call")
+
+
+def test_pre_authorisation_does_not_widen_the_role_surface(monkeypatch):
+    """always_allow pre-approves calls *within* a role's surface. Authorisation
+    still comes from the per-role endpoint, whose dispatch table refuses
+    anything outside it — the policy cannot reach across roles."""
+    monkeypatch.setattr(cma, "MCP", ON)
+    import mcp_server as ms
+    for role in Role:
+        served = {s["name"] for s in ms.tool_specs(role)}
+        assert served == roles_module.ROLE_TOOLS[role], (
+            f"{role.value} endpoint serves something other than its own tools")
+    agent_only = roles_module.ROLE_TOOLS[Role.AGENT] - roles_module.ROLE_TOOLS[Role.ADJUSTER]
+    assert agent_only, "expected at least one agent-only tool"
+    assert not (agent_only & {s["name"] for s in ms.tool_specs(Role.ADJUSTER)})
 
 
 def test_the_adjuster_keeps_its_prebuilt_toolset_in_mcp_mode(monkeypatch):

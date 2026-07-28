@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- 2026-07-28: **Switching to MCP silently started requiring per-call approval.** After `/update-agents` pointed the agents at the MCP server, every tool call raised a confirmation prompt in the Anthropic console — which stalls any unattended run, the exact capability this backend exists to provide. `mcp_tools_for_role` sent `{"type": "mcp_toolset", "mcp_server_name": …}` and nothing else, so the server-side default applied. `BetaManagedAgentsMCPToolsetDefaultConfigParams.permission_policy` is `always_allow | always_ask`, and unspecified evidently means ask.
+  - Now sends `default_config: {"enabled": true, "permission_policy": {"type": "always_allow"}}`. Custom tools never prompted, so this restores the behaviour the transport switch changed rather than granting anything new.
+  - **It does not widen what an agent can reach.** Authorisation still comes from the per-role endpoint: `/mcp/adjuster` cannot execute an agent tool whatever the policy says, because the server's dispatch table refuses it. The policy pre-approves calls *within* a role's surface, not across roles — there is a test asserting exactly that, so the claim cannot rot.
+  - `enabled` is sent explicitly rather than left to its default, so the value sent is the value echoed back and `_tools_match` does not read a server-filled field as drift on every run — the same trap `test_server_filled_tool_defaults_are_not_drift` already documents for prebuilt toolsets.
+  - 5 new tests (492 total). Mutation-checked: omitting `default_config` entirely (the pre-fix state) and flipping to `always_ask` each fail 4 tests.
+
+### Fixed
 - 2026-07-28: **The ACA deployment was silently discarding every write.** Claims written through the deployed server reappeared as the image's baked-in seed. Diagnosed from the live config, not guessed: `volumes: null`, `volumeMounts: null`, no `CLAIMS_DATA_DIR`, and `minReplicas: 0` — so writes landed in the container's writable layer, the replica terminated after the 300 s idle cooldown, and the next request cold-started a fresh container from `claims-mcp:v1`. Nothing was overridden; the layer holding the writes was destroyed and reseeded.
   - This is the behaviour section 9 of `ACA_Deploy.md` documented as the default, framed as "often what you want for a demo". For a server being driven for real it plainly is not, and a footnote was the wrong weight for it.
   - **Fixed by mounting Azure Files**: a `Standard_LRS` storage account, a 1 GiB share, an environment storage definition, and a template update adding the volume, the mount at `/data`, and `CLAIMS_DATA_DIR=/data`.

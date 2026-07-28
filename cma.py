@@ -132,8 +132,32 @@ def mcp_tools_for_role(role: Role) -> list[dict]:
     No per-tool ``configs``: the endpoint URL already decides what exists, so
     filtering here would be a second, advisory copy of the same allow-list that
     would need regenerating on every tool change.
+
+    ``always_allow`` is set deliberately. Left unspecified, MCP tool calls
+    default to requiring per-call confirmation, which surfaces as an approval
+    prompt in the Anthropic console and stalls any unattended run — the exact
+    thing this backend exists to make possible. Custom tools never asked, so
+    this restores the behaviour the MCP switch would otherwise have changed
+    silently.
+
+    What that does *not* do is widen what the agent can reach. Authorisation
+    still comes from the per-role endpoint: ``/mcp/adjuster`` cannot execute an
+    agent tool no matter what policy is set here, because the server's dispatch
+    table refuses it. This pre-approves calls within a role's surface, not
+    across roles.
+
+    ``enabled`` is sent explicitly rather than relying on its default, so the
+    value we send is the value the API echoes back and ``_tools_match`` does not
+    see a server-filled field as drift on every run.
     """
-    return [{"type": "mcp_toolset", "mcp_server_name": mcp_server.server_name(role)}]
+    return [{
+        "type": "mcp_toolset",
+        "mcp_server_name": mcp_server.server_name(role),
+        "default_config": {
+            "enabled": True,
+            "permission_policy": {"type": "always_allow"},
+        },
+    }]
 
 
 def mcp_servers_for_role(role: Role) -> list[dict]:
