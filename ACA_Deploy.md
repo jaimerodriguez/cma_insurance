@@ -65,10 +65,36 @@ az acr build --registry $ACR --image $IMAGE .
 # --logs-destination none skips the Log Analytics workspace and its ingestion
 # bill. Swap to `--logs-destination log-analytics` if you want queryable logs;
 # `az containerapp logs show` still works either way for live tailing.
+#
+# --no-wait on purpose. This is the slowest step (3-8 minutes) and without it the
+# CLI holds one HTTPS connection open for the whole wait, which is exactly the
+# connection a VPN, a corporate proxy, or an idle-connection reaper is most
+# likely to reset. The create is an async ARM operation regardless; --no-wait
+# just stops the client from betting on a long-lived socket. Poll below instead.
 az containerapp env create \
   --name $ENVNAME --resource-group $RG --location $LOC \
-  --logs-destination none
+  --logs-destination none \
+  --no-wait
 ```
+
+Poll until it is ready — each call is a short, independent request:
+
+```bash
+until [ "$(az containerapp env show -n $ENVNAME -g $RG \
+           --query properties.provisioningState -o tsv 2>/dev/null)" = "Succeeded" ]; do
+  echo "waiting for $ENVNAME ..."; sleep 20
+done
+echo "environment ready"
+```
+
+If that loop runs for more than ~10 minutes, check for a real failure:
+
+```bash
+az containerapp env show -n $ENVNAME -g $RG --query properties.provisioningState -o tsv
+```
+
+`Failed` means the create genuinely failed; anything else means it is still
+working.
 
 Then create the app:
 
@@ -106,6 +132,10 @@ export FQDN=$(az containerapp show -n $APP -g $RG \
   --query properties.configuration.ingress.fqdn -o tsv)
 echo "https://$FQDN"
 ```
+
+If `create` above died with a connection error, run this `show` anyway before
+retrying — like the environment create, it is async and the app is often there
+regardless. An empty result means it really is absent; re-run the create.
 
 ---
 
@@ -359,6 +389,45 @@ keep them, either add a second volume mount for `OBS_VAR_DIR` or leave
 ---
 
 ## 10. Troubleshooting
+
+**`az acr build` or `az containerapp env create` dies with `('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))`.**
+
+**Check whether it actually worked before re-running anything.** That traceback
+is the Azure CLI's HTTPS connection being reset — a client-side network failure,
+not Azure rejecting the request. Both of these are long-running *async*
+operations: the work continues server-side after the CLI loses its socket, so
+the resource is often created despite the error.
+
+```bash
+az containerapp env show -n $ENVNAME -g $RG --query properties.provisioningState -o tsv
+az acr repository show-tags -n $ACR --repository claims-mcp -o tsv
+```
+
+`Succeeded` (or the tag being listed) means you are done — move to the next step.
+Re-running `create` blindly is what turns a cosmetic error into a confusing one.
+
+If the environment is genuinely absent, re-run its create with `--no-wait` and
+poll (step 3 already does this). For a dropped `az acr build`, re-attach to the
+running build rather than starting a second one:
+
+```bash
+az acr task list-runs --registry $ACR --top 3 -o table
+az acr task logs --registry $ACR            # last run; add --run-id for a specific one
+```
+
+Common causes, in the order worth checking:
+
+- **A VPN or corporate proxy doing TLS inspection.** This is the usual one — the
+  reset happens during the TLS handshake, which is where a middlebox intervenes.
+  Try again off the VPN.
+- **A long-lived connection reaped while idle.** `env create` takes 3–8 minutes
+  and, without `--no-wait`, holds one connection open for all of it. That is why
+  step 3 uses `--no-wait` plus a polling loop of short requests.
+- **A transient drop.** Simply retrying often works.
+
+Do **not** reach for `az config set core.disable_connection_verify=true`. It
+turns off TLS certificate validation, which does not fix a reset connection and
+does expose your credentials.
 
 **`az acr build` fails with "the --chmod option requires BuildKit".**
 ACR Tasks builds with the **classic** Docker builder, not BuildKit, so

@@ -215,6 +215,30 @@ def test_the_entrypoint_is_made_executable_in_the_image():
     assert "chmod 755 /app/entrypoint.sh" in text or "chmod +x /app/entrypoint.sh" in text
 
 
+def test_deploy_guide_shell_blocks_parse():
+    """ACA_Deploy.md is mostly commands meant to be pasted into a shell. A typo
+    in one is discovered by the person following it at the worst moment, so
+    parse every block here instead. `bash -n` checks syntax without executing —
+    nothing touches Azure."""
+    guide = PROJECT_ROOT / "ACA_Deploy.md"
+    blocks = re.findall(r"```bash\n(.*?)```", guide.read_text(), re.S)
+    assert len(blocks) > 15, "guide lost its command blocks?"
+
+    # Blocks with a `<placeholder>` are prose for the reader to fill in and are
+    # not valid shell by design.
+    placeholder = re.compile(r"<[a-z][a-z0-9 ._-]*>")
+
+    errors = []
+    for i, block in enumerate(blocks, 1):
+        if placeholder.search(block):
+            continue
+        result = subprocess.run(["bash", "-n"], input=block,
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            errors.append(f"block {i}: {result.stderr.strip()}\n{block}")
+    assert not errors, "\n\n".join(errors)
+
+
 def test_claims_data_dir_relocates_every_storage_path():
     """The override must reach the file constants, not just ``DATA_DIR``.
 
