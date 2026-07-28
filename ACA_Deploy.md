@@ -380,11 +380,12 @@ If it is not writable the container **exits immediately** with
 `FATAL: /data is not writable by uid 10001` rather than starting and failing on
 every tool call, which would read as a bug in the tools rather than a bad mount.
 
-> Verified locally against a Docker named volume — seeding, the privilege drop,
-> persistence across a restart, and the read-only failure path. **Not yet
-> verified against a real Azure Files mount**, which is where the `mountOptions`
-> line above matters; if the container exits with that FATAL, that line is what
-> to adjust.
+> **Verified against a real Azure Files mount** (2026-07-28): the share seeds on
+> first boot, the container drops to uid 10001 and writes successfully, and
+> claims written through the deployed server survive a revision restart with no
+> reseeding on the way back up. The `mountOptions` line above is
+> what makes that work — without it the mount arrives root-owned and the
+> container exits with the FATAL message.
 
 Two consequences worth knowing before you choose this:
 
