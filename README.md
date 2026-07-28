@@ -388,6 +388,24 @@ lives in a Managed Agents **vault** keyed by endpoint URL and reaches the run vi
 `vault_ids`. `ensure_vault` reconciles those by URL, because the URL is what moves
 when the server is re-homed.
 
+**Calling a tool without a model.** `mcp_call.py` drives one tool over a real MCP
+session — the same `ClientSession` / `streamable_http_client` stack a Managed
+Agents run uses, so it exercises what can actually break rather than just POSTing
+JSON:
+
+```bash
+python3 mcp_call.py --list                                   # tools on /mcp/agent
+python3 mcp_call.py agent generate_unassigned_incidents count=20
+python3 mcp_call.py insurer find_insurer insurer_id=ins-1001
+```
+
+Arguments are `key=value`, JSON-parsed, so `count=20` is an integer. The endpoint
+comes from `MCP_PUBLIC_URL`/`MCP_BEARER_TOKEN` in `.env`, falling back to local;
+`--local` forces local and `--url` overrides both. Exit status is 0 on success,
+1 on a tool error, 2 on a transport or auth failure, so it composes in scripts.
+The target URL is echoed to stderr before every call — with `MCP_PUBLIC_URL` set
+the **deployment** is the default, and some tools are destructive.
+
 **Deploying it.** For a public endpoint — which is what unattended runs need —
 see **[ACA_Deploy.md](ACA_Deploy.md)**: a `Dockerfile` and step-by-step Azure
 Container Apps setup, including how to start and stop it to keep the cost at

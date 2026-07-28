@@ -166,6 +166,19 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 A `401` on the second command means the token in the container secret and the
 one in your shell have drifted.
 
+Once step 5 puts `MCP_PUBLIC_URL` and `MCP_BEARER_TOKEN` in `.env`, `mcp_call.py`
+does the same checks without the JSON-RPC boilerplate:
+
+```bash
+python3 mcp_call.py --list                                  # what the agent endpoint serves
+python3 mcp_call.py agent generate_unassigned_incidents count=20
+```
+
+It prints the target URL to stderr before every call. Worth watching: with
+`MCP_PUBLIC_URL` set, the **deployment** is the default target, and
+`generate_unassigned_incidents` discards every claim on the server. Add
+`--local` to aim at a local `python3 mcp_server.py` instead.
+
 ---
 
 ## 5. Point `cma.py` at it
