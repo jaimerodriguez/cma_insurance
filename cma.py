@@ -895,11 +895,15 @@ class CmaSession:
                             stop = getattr(event, "stop_reason", None)
                             stop_type = getattr(stop, "type", None)
                             blocked_on = list(getattr(stop, "event_ids", None) or [])
-                            # Logged at info: without it the events log cannot tell
-                            # "idle, waiting on us" from "idle, done" after the fact,
-                            # which is what made this stall hard to see.
+                            # The ids, not just how many. Logging only the count
+                            # meant a later failure — the session naming ids we
+                            # never collected, or us answering ids it never named
+                            # — could not be diagnosed from the trace at all, and
+                            # the wire log does not capture SSE response bodies.
                             obs.events.info("cma.idle", stop=stop_type,
-                                            blocked_on=len(blocked_on))
+                                            blocked_on=len(blocked_on),
+                                            event_ids=blocked_on,
+                                            collected=[c.id for c in tool_calls])
                             if stop_type != "requires_action":
                                 terminated = False
                                 break
@@ -918,6 +922,15 @@ class CmaSession:
                 if terminated or not tool_calls:
                     break
                 to_send = [self._tool_result(call) for call in tool_calls]
+                # What we are about to answer, and on whose behalf. A subagent's
+                # call carries a thread id and is answered differently from the
+                # coordinator's own; when a batch is rejected, this is the record
+                # of exactly which ids and which threads were in it.
+                obs.events.info(
+                    "cma.tool_results", count=len(to_send),
+                    ids=[c.id for c in tool_calls],
+                    threads=sorted({getattr(c, "session_thread_id", None) or "-"
+                                    for c in tool_calls}))
 
             obs.record_turn(span, obs.usage.from_cma_usage(
                 usage, session_id=self.session_id,

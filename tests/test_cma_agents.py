@@ -16,6 +16,7 @@ Run with:  .venv/bin/python -m pytest tests/ -q
 from __future__ import annotations
 
 import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -689,3 +690,58 @@ def test_the_suggested_task_is_a_suggestion_not_a_default(monkeypatch):
 def test_help_documents_both_agent_forms():
     assert "/agent <text>" in cma._HELP
     assert "/agent  " in cma._HELP        # the bare, session-starting form
+
+
+# --- diagnosability of a rejected tool-result batch -------------------------
+#
+# A live run failed with `tool_use_id "sevt_..." does not match any
+# custom_tool_use event in this session`, and the trace could not explain it:
+# `cma.idle` recorded only how many ids the session was blocked on, not which,
+# and nothing recorded which ids we then answered. The wire log does not capture
+# SSE response bodies, so the ids were unrecoverable after the fact. These pin
+# the fields that make that diagnosable.
+
+def _traced_send(role, config, legs, monkeypatch, tmp_path):
+    """Run a scripted send inside a real Observability run and return its events."""
+    from agent_obs import ObsConfig, Observability
+
+    cfg = ObsConfig(var_dir=tmp_path, enabled=True)
+    with Observability.start(cfg, front_end="t"):
+        _run_send(role, config, legs, monkeypatch)
+    return [json.loads(line)
+            for path in sorted(tmp_path.rglob("*.events.jsonl"))
+            for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_the_idle_event_records_which_ids_not_just_how_many(in_sync, monkeypatch,
+                                                            tmp_path):
+    rows = _traced_send(Role.AGENT, in_sync[1], [
+        [_call("sevt_1"), _call("sevt_2"), _idle("sevt_1", "sevt_2")],
+        [_idle(stop="end_turn")],
+    ], monkeypatch, tmp_path)
+
+    idles = [r for r in rows if r.get("event") == "cma.idle"]
+    assert idles, "no cma.idle event recorded"
+    first = idles[0]
+    assert first["event_ids"] == ["sevt_1", "sevt_2"], (
+        "the blocking ids must be in the trace — a count cannot be compared "
+        "against what we answered")
+    assert first["collected"] == ["sevt_1", "sevt_2"]
+
+
+def test_the_answered_ids_and_their_threads_are_recorded(in_sync, monkeypatch,
+                                                         tmp_path):
+    """A subagent's call is answered differently from the coordinator's own, so
+    the thread has to be in the record when a batch is rejected."""
+    sub = _Ev(type="agent.custom_tool_use", id="sevt_sub", name="list_incidents",
+              input={}, session_thread_id="sthr_9")
+    rows = _traced_send(Role.AGENT, in_sync[1], [
+        [_call("sevt_own"), sub, _idle("sevt_own", "sevt_sub")],
+        [_idle(stop="end_turn")],
+    ], monkeypatch, tmp_path)
+
+    results = [r for r in rows if r.get("event") == "cma.tool_results"]
+    assert results, "nothing recorded which ids were answered"
+    assert results[0]["ids"] == ["sevt_own", "sevt_sub"]
+    assert results[0]["threads"] == ["-", "sthr_9"], (
+        "the thread each answered call belongs to must be visible")
