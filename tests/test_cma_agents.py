@@ -781,3 +781,54 @@ def test_the_answered_ids_and_their_threads_are_recorded(in_sync, monkeypatch,
     assert results[0]["ids"] == ["sevt_own", "sevt_sub"]
     assert results[0]["threads"] == ["-", "sthr_9"], (
         "the thread each answered call belongs to must be visible")
+
+
+# --- delegation prompt: spawn late, brief completely ------------------------
+#
+# Measured from run cma-20260728-130639-e08f6d: the first subagent was spawned
+# 10% into the run and then averaged 3 round trips each, because the coordinator
+# delegated before triage was finished and the adjuster had to ask for what it
+# was missing. These pin the instructions that address that.
+
+def _agent_prompt() -> str:
+    return roles_module.build_system_prompt(
+        Role.AGENT, "system",
+        delegate_agents=[("adjuster-jaime", "handles jaime's claims")])
+
+
+def test_delegation_waits_until_triage_is_done():
+    """The old text said 'once a claim has an adjuster ... delegate it', which
+    reads as a per-claim trigger and is why subagents started 10% into a run."""
+    p = _agent_prompt()
+    assert "before you launch a single subagent" in p
+    assert "one task per adjuster" in p
+    assert "never one\ntask per claim" in p or "never one task per claim" in p
+
+
+def test_the_delegation_brief_enumerates_what_the_adjuster_needs():
+    """A thin brief is what forces the adjuster to message back."""
+    p = _agent_prompt()
+    assert "A brief is complete when the adjuster needs nothing further" in p
+    for required in ("the claim id", "authorization band", "VIP status"):
+        assert required in p, f"brief spec no longer mentions {required!r}"
+
+
+def test_the_adjuster_is_told_not_to_ask_the_coordinator_to_confirm():
+    """`Always confirm before denying a claim or approving many at once` was
+    unconditional, so every delegated batch cost a confirmation round trip. It
+    has to stay for interactive sessions and go for delegated ones."""
+    p = roles_module.build_system_prompt(Role.ADJUSTER, "jaime")
+    assert "its brief is your authorization" in p
+    assert "Do not ask it to confirm" in p
+    # The interactive rule survives, now scoped.
+    assert "working with a person" in p
+    assert "confirm before\ndenying a claim" in p or "confirm before denying a claim" in p
+
+
+def test_the_adjuster_is_told_to_look_things_up_itself():
+    p = roles_module.build_system_prompt(Role.ADJUSTER, "jaime")
+    assert "anything you\ncan establish yourself" in p or "anything you can establish yourself" in p
+    for tool in ("get_incident_details", "find_insurer", "find_policy"):
+        assert tool in p, f"{tool} not offered as a self-serve alternative"
+        assert tool in roles_module.ROLE_TOOLS[Role.ADJUSTER], (
+            f"prompt tells the adjuster to use {tool}, which its role cannot call")
