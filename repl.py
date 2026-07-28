@@ -50,6 +50,7 @@ import traceback
 from collections.abc import Generator
 from datetime import date, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, cast
 
 import agent_obs
@@ -95,6 +96,49 @@ def _jsonify(result: Any) -> str:
         return str(o)
 
     return json.dumps(result, default=default, indent=2)
+
+
+def enable_line_editing(history_name: str = "repl") -> None:
+    """Give ``input()`` arrow keys, history, and Ctrl-A/E — and persist history.
+
+    Importing ``readline`` is the whole mechanism: it installs itself as the hook
+    ``input()`` uses, so this must happen before the first prompt. Without it the
+    terminal stays in canonical mode and an arrow key arrives as its raw escape
+    sequence — Up echoes ``^[[A`` into the line instead of recalling the previous
+    command, Shift-Left echoes ``^[[1;2D``.
+
+    Every step is best-effort. A REPL that refused to start because it could not
+    write a history file would be a worse bug than the one this fixes.
+    """
+    try:
+        import atexit
+        import readline
+    except ImportError:                      # not built with readline
+        return
+
+    # libedit (some macOS builds) needs different binding syntax from GNU
+    # readline for the same behaviour; arrow keys work on both by default.
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
+    try:
+        history = Path(__file__).parent / "var" / f"{history_name}_history"
+        history.parent.mkdir(parents=True, exist_ok=True)
+        if history.exists():
+            readline.read_history_file(history)
+        readline.set_history_length(1000)
+        atexit.register(lambda: _save_history(readline, history))
+    except OSError:
+        pass                                 # editing still works, just not across runs
+
+
+def _save_history(readline: Any, path: Path) -> None:
+    try:
+        readline.write_history_file(path)
+    except OSError:
+        pass
 
 
 @agent_obs.traced_dispatch
@@ -835,6 +879,7 @@ def main() -> None:
                   f"/obs for detail.")
         print()
         print(_HELP)
+        enable_line_editing("repl")
         while True:
             try:
                 line = input(_prompt(session)).strip()

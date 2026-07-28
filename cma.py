@@ -1135,6 +1135,11 @@ def main() -> None:
         def prompt() -> str:
             return f"({session.role.value}:{session.identity})> " if session else "(no session)> "
 
+        # Separate history file from repl.py's: the two REPLs have different
+        # commands, so sharing one would fill each with the other's misses.
+        from repl import enable_line_editing
+        enable_line_editing("cma")
+
         while True:
             try:
                 line = input(prompt()).strip()
