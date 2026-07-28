@@ -85,6 +85,19 @@ def test_the_server_does_not_import_the_client_side_entry_points():
     assert not (first_party & CLIENT_ONLY)
 
 
+def test_the_server_never_pulls_in_the_client_side_packages():
+    """`requirements-mcp.txt` omits `anthropic`, `claude-agent-sdk` and `PyYAML`
+    because the modules that use them import them inside functions the server
+    never calls. That is an assumption about `repl.py`'s internals, so check it
+    rather than trust it: promoting one of those to a module-level import would
+    otherwise pass every test here and fail on the first cold start in Azure."""
+    _, third_party = _import_closure()
+    leaked = third_party & {"anthropic", "claude_agent_sdk", "yaml"}
+    assert not leaked, (
+        f"{sorted(leaked)} reached the server's import closure. Either make the "
+        f"import function-local again or add it to requirements-mcp.txt.")
+
+
 def _direct_third_party_imports(first_party: set[str]) -> set[str]:
     """Top-level packages our own modules import by name, stdlib excluded.
 

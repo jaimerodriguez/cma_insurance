@@ -22,12 +22,14 @@ The tool allow-lists below reference functions by name from
 
 import json
 from collections.abc import Iterable, Sequence
+from dataclasses import asdict
 from enum import Enum
 from typing import Any, Callable
 
 import agent_memory
 import agent_schemas
 import tools
+from data_entities import DynamicPolicies
 
 
 class Role(str, Enum):
@@ -110,7 +112,7 @@ def tools_for_role(spec: RoleSpec) -> list[Callable[..., Any]]:
     return [fn for fn in tools.AGENT_TOOLS if fn.__name__ in allowed]
 
 
-def schemas_for_role(spec: RoleSpec) -> list[dict]:
+def schemas_for_role(spec: RoleSpec) -> list[agent_schemas.ToolSchema]:
     """Return the Anthropic tool schemas for the tools this role (or roles) may call."""
     allowed = allowed_tool_names(spec)
     return [s for s in agent_schemas.build_tool_schemas() if s["name"] in allowed]
@@ -275,7 +277,6 @@ def build_system_prompt(role: Role, identity_id: str, extra: str = "",
     return f"{prompt}\n\n{extra.strip()}" if extra.strip() else prompt
 
 
-def _policies_dict(policies) -> dict[str, Any]:
+def _policies_dict(policies: DynamicPolicies) -> dict[str, Any]:
     """The DynamicPolicies fields as a plain dict for the prompt / tool argument."""
-    from dataclasses import asdict
     return asdict(policies)

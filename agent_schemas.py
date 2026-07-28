@@ -30,6 +30,14 @@ from tools import AGENT_TOOLS
 
 SCHEMA_FILE = Path(__file__).with_name("agent_tools_schema.json")
 
+# A JSON-schema fragment, and a whole Anthropic tool schema. Both are plain
+# dicts at runtime; the aliases exist so the annotations say which of the two a
+# function deals in, and so a bare ``dict`` does not leak "unknown value type"
+# into every caller — ``roles.schemas_for_role`` and ``mcp_server.tool_specs``
+# both re-export this shape.
+JsonSchema = dict[str, typing.Any]
+ToolSchema = dict[str, typing.Any]
+
 _PRIMITIVES: dict[type, str] = {
     str: "string",
     int: "integer",
@@ -88,7 +96,7 @@ def _is_special(tp: object) -> bool:
     return (isinstance(tp, type) and issubclass(tp, Enum)) or is_dataclass(tp)
 
 
-def _as_nullable(schema: dict) -> dict:
+def _as_nullable(schema: JsonSchema) -> JsonSchema:
     """Widen a schema so it also accepts ``null``.
 
     A parameter annotated ``X | None`` genuinely accepts ``None``, and the model
@@ -114,7 +122,7 @@ def _as_nullable(schema: dict) -> dict:
     return out
 
 
-def _type_to_schema(tp: object, description: str = "") -> dict:
+def _type_to_schema(tp: object, description: str = "") -> JsonSchema:
     """Map a Python type annotation to a JSON-schema fragment."""
     origin = typing.get_origin(tp)
     if origin is types.UnionType or origin is typing.Union:
@@ -126,7 +134,7 @@ def _type_to_schema(tp: object, description: str = "") -> dict:
         schema = _type_to_schema(chosen, description)
         return _as_nullable(schema) if len(args) != len(all_args) else schema
 
-    schema: dict = {}
+    schema: JsonSchema = {}
     if isinstance(tp, type) and issubclass(tp, IntFlag):
         members = ", ".join(f"{m.name}={m.value}" for m in tp)
         schema = {"type": "integer"}
@@ -148,27 +156,27 @@ def _type_to_schema(tp: object, description: str = "") -> dict:
     return schema
 
 
-def _dataclass_to_schema(dc: type) -> dict:
+def _dataclass_to_schema(dc: type) -> JsonSchema:
     """Build an object schema for a dataclass parameter (e.g. ``DynamicPolicies``)."""
     _, attr_desc = _parse_docstring(dc.__doc__)
     hints = typing.get_type_hints(dc)
-    properties: dict[str, dict] = {}
+    properties: dict[str, JsonSchema] = {}
     required: list[str] = []
     for f in fields(dc):
         properties[f.name] = _type_to_schema(hints.get(f.name, str), attr_desc.get(f.name, ""))
         if f.default is MISSING and f.default_factory is MISSING:
             required.append(f.name)
-    schema: dict = {"type": "object", "properties": properties, "additionalProperties": False}
+    schema: JsonSchema = {"type": "object", "properties": properties, "additionalProperties": False}
     if required:
         schema["required"] = required
     return schema
 
 
-def build_tool_schema(func: typing.Callable) -> dict:
+def build_tool_schema(func: typing.Callable[..., typing.Any]) -> ToolSchema:
     """Build one Anthropic tool schema from a function in ``AGENT_TOOLS``."""
     summary, arg_desc = _parse_docstring(func.__doc__)
     hints = typing.get_type_hints(func)
-    properties: dict[str, dict] = {}
+    properties: dict[str, JsonSchema] = {}
     required: list[str] = []
     for name, param in inspect.signature(func).parameters.items():
         if name == "self":
@@ -177,13 +185,14 @@ def build_tool_schema(func: typing.Callable) -> dict:
         if param.default is inspect.Parameter.empty:
             required.append(name)
 
-    input_schema: dict = {"type": "object", "properties": properties, "additionalProperties": False}
+    input_schema: JsonSchema = {"type": "object", "properties": properties,
+                                "additionalProperties": False}
     if required:
         input_schema["required"] = required
     return {"name": func.__name__, "description": summary, "input_schema": input_schema}
 
 
-def build_tool_schemas() -> list[dict]:
+def build_tool_schemas() -> list[ToolSchema]:
     """Build the Anthropic tool schema list for every function in ``AGENT_TOOLS``."""
     return [build_tool_schema(func) for func in AGENT_TOOLS]
 

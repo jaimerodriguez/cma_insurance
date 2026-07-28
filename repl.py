@@ -50,7 +50,7 @@ import traceback
 from collections.abc import Generator
 from datetime import date, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import agent_obs
 import roles
@@ -165,7 +165,7 @@ def _build_sdk_server(role: Role):
             return {"content": [{"type": "text", "text": _dispatch(table, tool_name, args)}]}
         return handler
 
-    sdk_tools = []
+    sdk_tools: list[Any] = []
     allowed: list[str] = []
     for schema in roles.schemas_for_role(session_roles):
         name = schema["name"]
@@ -348,8 +348,17 @@ class Session:
                     system=self.system_prompt,
                     thinking={"type": "adaptive"},
                     output_config={"effort": "medium"},
-                    tools=schemas,
-                    messages=self.messages,
+                    # The SDK types these as TypedDict unions — `ToolUnionParam`
+                    # and `MessageParam` — and we hold plain dicts: `schemas`
+                    # comes from `agent_schemas`, and the transcript mixes
+                    # request and response content blocks, which the SDK types
+                    # separately. The shapes are correct (the API validates them
+                    # on every run), so this is a cast, not a silenced bug. Cast
+                    # via `Any` rather than importing `anthropic.types`, because
+                    # `repl.py` ships in the MCP container, which deliberately
+                    # does not install `anthropic`.
+                    tools=cast(Any, schemas),
+                    messages=cast(Any, self.messages),
                 )
                 record = obs.usage.from_api_response(
                     response, wall_ms=int((time.monotonic() - started) * 1000),
@@ -367,7 +376,7 @@ class Session:
                 self.messages.append({"role": "assistant", "content": response.content})
 
                 if response.stop_reason == "tool_use":
-                    results = []
+                    results: list[dict[str, Any]] = []
                     for block in response.content:
                         if block.type != "tool_use":
                             continue
