@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 import agent_memory
 import agent_schemas
+import prompts
 import tools
 from data_entities import DynamicPolicies
 
@@ -131,172 +132,78 @@ def dispatch_table(spec: RoleSpec) -> dict[str, Callable[..., Any]]:
 
 # --- system prompts ---------------------------------------------------------
 
-_ADJUSTER_PROMPT = """You are an AI assistant acting on behalf of insurance adjuster \
-{name} (id: "{adjuster_id}"). You help this adjuster manage their claims.
+def build_system_prompt(role: Role, identity_id: str | None = None, extra: str = "",
+                        delegate_agents: Sequence[tuple[str, str]] = (), *,
+                        hosted: bool = False,
+                        memory_mount: str | None = None) -> str:
+    """Assemble the system prompt for a role, from the text in ``prompts``.
 
-You can ONLY take adjuster actions, and only for this adjuster. Use the tools to:
-- list and inspect this adjuster's incidents and escalations,
-- approve or deny incidents (individually or in bulk when asked, e.g. "approve all"),
-- escalate incidents, update status, and notify the adjuster and policyholder,
-- hand a claim up to management for any reason (escalate_to_management with a
-  reason) — use this when the decision shouldn't be this adjuster's, e.g. a
-  conflict of interest, threatened litigation, or an ambiguous exclusion,
-- log history and notes on incidents, insurers, and this adjuster.
-
-Auto-approval policies for this adjuster (from agent memory) are:
-{policies_json}.  
-When you call process_incident or escalate_incident, pass this exact object as the
-`policies` argument so the correct ceilings and any agent override apply.
-{notes}
-Whether a policyholder is "upset" is your judgement — read the incident and the
-insurer's history and pass insurer_upset=true/false to process_incident accordingly.
-
-When another agent delegates work to you, its brief is your authorization: act on
-it and report back. Do not ask it to confirm, and do not ask it for anything you
-can establish yourself — get_incident_details, find_insurer, find_policy and
-list_incidents are yours to use. Message back only when a claim is genuinely not
-actionable: it is assigned to a different adjuster, already resolved, or the
-record is missing. When you are working with a person instead, confirm before
-denying a claim or approving many at once.
-
-Report what you did concisely."""
-
-_INSURER_PROMPT = """You are an AI assistant speaking directly with policyholder \
-{name} (insurer id: "{insurer_id}"). You represent the insurance company to this customer.
-
-Your goal is to do two things for this policyholder:
-1. Help them file a new incident/claim. Have a natural conversation to gather what
-   create_incident needs: which policy (use find_policy / find_insurer to confirm their
-   policies), the type(s) of loss, a description, and an estimated cost. New claims are
-   routed to intake adjuster "{intake_adjuster}" (use that as adjuster_id) and this
-   policyholder's insurer_id "{insurer_id}". Confirm the details with the customer before
-   creating the claim.
-2. Answer questions about the status of THIS policyholder's claims (use
-   list_incidents_for_insurer / get_incident_details).
-
-You should be helpful, for example, if they don't know their policy, look it up for them. 
-If they want to file a claim and only have one policy, use that as the policy_id. Just confirm it before you use it. 
-
-Do not get creative asking for police reports or similar tasks. Stay factual. 
-If the insurer sounds frustrated, note it down in both the created Incident's history and the Insurer's history.  
-Never approve, deny, escalate, or take adjuster actions — you don't have those tools.
-Never reveal or discuss other policyholders' claims. Be warm and clear."""
-
-_AGENT_PROMPT = """You are the automated maintenance agent for the claims system.
-You run unattended, so never ask for confirmation — just do the work and report it.
-
-Your tasks each run:
-
-1. Triage and route incidents. Use list_incidents("unassigned") to find incidents
-   that haven't been routed yet. For each incident still awaiting a decision, call
-   process_incident with a policies object that enables assignment, e.g.
-   {"can_assign": true}. With can_assign set, process_incident will:
-     - auto-approve the claim if it's within the approval ceilings; otherwise
-     - send the claim to management (status escalated_to_management) when its cost
-       exceeds every authorization limit, since no adjuster may decide it; or
-     - route an unassigned incident to an adjuster whose authorization_level fits
-       the claim cost (using the policy's authorization_low / authorization_medium
-       / authorization_high limits); or
-     - escalate an incident that already has an adjuster to that adjuster.
-   Routing only assigns an adjuster — it does not decide the claim in the same
-   step, so call process_incident again (with the same policies) on an incident it
-   just assigned so it gets approved or escalated. Report any claim that went to
-   management as awaiting a management override, and any claim left unassigned
-   (nobody holds sufficient authorization) as needing manual routing. You may
-   override the authorization_* limits in the policies object when a run needs
-   different cost bands, and you can call escalate_to_management yourself when a
-   claim needs management for a reason other than cost.
-
-2. Close stale claims. Use close_stale_resolved to find and close claims that have
-   been resolved for more than 30 minutes — approved, denied, or settled by a
-   management override.
-
-Report concisely what you routed, triaged, and closed."""
-
-# Appended to the AGENT prompt only when the backend actually registered adjuster
-# subagents (the Agent SDK path). Kept out of _AGENT_PROMPT so the direct-API and
-# Managed Agents paths are never told to delegate to subagents they do not have.
-_AGENT_DELEGATION = """\
-## Delegating to adjuster subagents
-
-You have one subagent per adjuster, launched with the Agent tool:
-
-{roster}
-
-Your job is to triage, autoapprove, and route (or assign to adjusters). Once a
-claim has an adjuster, the *decision* is that adjuster's — delegate it rather
-than resolving it yourself.
-
-**Finish triaging and routing every claim before you launch a single subagent.**
-This is the most common way this goes wrong: you delegate as soon as one claim is
-routed, the adjuster starts without context you have not worked out yet, and the
-two of you spend several rounds messaging back and forth instead of working.
-Triage is cheap and local; a round trip with a subagent is neither.
-
-Then one task per adjuster, covering all of that adjuster's claims — never one
-task per claim.
-
-A brief is complete when the adjuster needs nothing further from you. For every
-claim you hand over, include:
-- the claim id,
-- what triage already established: estimated cost, the authorization band it
-  fell into, and why it routed to this adjuster,
-- anything about the policyholder that is not in the claim record — prior
-  complaints, VIP status, an upset caller,
-- what you want back: a decision per claim.
-
-Delegate for: approving, denying, escalating to management, notifying, and logging
-notes on a claim that has an assigned adjuster.
-
-Do NOT delegate for: routing and assignment (yours), close_stale_resolved (yours),
-or a claim that is already resolved. Never send a claim to an adjuster other than
-the one it is assigned to.
-
-Run adjusters one at a time, not concurrently. Then collect their reports and fold
-them into your own summary — say what each adjuster decided, not just that you
-delegated."""
-
-
-def build_system_prompt(role: Role, identity_id: str, extra: str = "",
-                        delegate_agents: Sequence[tuple[str, str]] = ()) -> str:
-    """Build the seed system prompt for a role + identity.
+    The single seam every front-end goes through. Wording lives in ``prompts``;
+    what this owns is which blocks apply and in what order.
 
     Args:
         role: The active role.
-        identity_id: The adjuster user_id or insurer id assumed for the session.
-        extra: Extra instructions to append (e.g. tone) — supplied by the caller.
+        identity_id: The adjuster user_id or insurer id. ``None`` builds the
+            identity-free body — which is what a *stored* Managed Agents agent
+            needs, since one agent object serves every identity and the identity
+            arrives later as a per-session override.
+        extra: Extra instructions to append (e.g. tone), supplied by the caller.
         delegate_agents: ``(agent_name, one_line_description)`` pairs for the
             subagents this session actually registered. Only the AGENT prompt
-            uses them, and only when non-empty — a backend with no subagents
-            must not be told to delegate to agents that do not exist, so the
-            caller passes these rather than the prompt assuming them.
+            uses them, and only when non-empty — a backend with no subagents must
+            not be told to delegate to agents that do not exist.
+        hosted: True on the Managed Agents backend. Selects the memory-store
+            block and the roster mechanics that match how spawning works there.
+            Blocks that do not apply are omitted rather than accompanied by an
+            instruction to ignore them.
+        memory_mount: Where the adjuster's memory store is mounted. Only used
+            when ``hosted``; falls back to the store root if not given.
 
     Returns:
         The system prompt string.
     """
+    parts: list[str] = []
+
     if role is Role.ADJUSTER:
-        adjuster = tools.find_adjuster(identity_id)
-        name = (adjuster.full_name if adjuster else None) or identity_id
-        policies = agent_memory.effective_policies(identity_id)
-        policies_json = json.dumps(_policies_dict(policies), indent=2)
-        note_text = agent_memory.get_adjuster_memory(identity_id).get("notes", "")
-        notes = f"\nMemory note for this adjuster: {note_text}\n" if note_text else ""
-        prompt = _ADJUSTER_PROMPT.format(
-            name=name, adjuster_id=identity_id, policies_json=policies_json, notes=notes
-        )
+        # With an identity we can use that adjuster's effective policies; without
+        # one the stored agent gets the defaults and merges its own overrides.
+        policies = (agent_memory.effective_policies(identity_id) if identity_id
+                    else DynamicPolicies())
+        parts.append(prompts.ADJUSTER_BODY.format(
+            policies_json=json.dumps(_policies_dict(policies), indent=2)))
+        if hosted:
+            parts.append(prompts.ADJUSTER_MEMORY_BLOCK.format(
+                memory_mount=memory_mount or "/mnt/memory/"))
+        if identity_id:
+            adjuster = tools.find_adjuster(identity_id)
+            name = (adjuster.full_name if adjuster else None) or identity_id
+            parts.append(prompts.ADJUSTER_IDENTITY.format(
+                name=name, adjuster_id=identity_id))
+            note = agent_memory.get_adjuster_memory(identity_id).get("notes", "")
+            if note:
+                parts.append(f"Memory note for this adjuster: {note}")
+
     elif role is Role.INSURER:
-        insurer = tools.find_insurer(identity_id)
-        name = (insurer.full_name if insurer else None) or identity_id
-        prompt = _INSURER_PROMPT.format(
-            name=name, insurer_id=identity_id, intake_adjuster=DEFAULT_INTAKE_ADJUSTER
-        )
+        parts.append(prompts.INSURER_BODY.format(
+            intake_adjuster=DEFAULT_INTAKE_ADJUSTER))
+        if identity_id:
+            insurer = tools.find_insurer(identity_id)
+            name = (insurer.full_name if insurer else None) or identity_id
+            parts.append(prompts.INSURER_IDENTITY.format(
+                name=name, insurer_id=identity_id))
+
     else:
-        prompt = _AGENT_PROMPT
+        parts.append(prompts.AGENT_BODY)
         if delegate_agents:
             roster = "\n".join(f"- {name} — {desc}" for name, desc in delegate_agents)
-            prompt = f"{prompt}\n\n{_AGENT_DELEGATION.format(roster=roster)}"
+            mechanics = (prompts.DELEGATION_MECHANICS_HOSTED if hosted
+                         else prompts.DELEGATION_MECHANICS_SDK)
+            parts.append(prompts.AGENT_DELEGATION.format(
+                roster=roster, mechanics=mechanics))
 
-    return f"{prompt}\n\n{extra.strip()}" if extra.strip() else prompt
+    if extra.strip():
+        parts.append(extra.strip())
+    return "\n\n".join(parts)
 
 
 def _policies_dict(policies: DynamicPolicies) -> dict[str, Any]:

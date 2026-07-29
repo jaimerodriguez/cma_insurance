@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -r requirements-mcp.txt
 
 COPY agent_obs/ ./agent_obs/
 COPY mcp_server.py repl.py roles.py tools.py storage.py \
-     data_entities.py agent_schemas.py agent_memory.py ./
+     data_entities.py agent_schemas.py agent_memory.py prompts.py ./
 
 # Only the five stores storage.py reads plus the agent's memory file. The
 # synthetic-incidents-*.json fixtures are test data and are left behind.
