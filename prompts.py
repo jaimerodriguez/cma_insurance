@@ -195,12 +195,10 @@ delegated.
 # this is selected, not described generically.
 DELEGATION_MECHANICS_HOSTED = """\
 How delegation actually works here: spawning from the roster is a built-in
-capability of this session, not a tool you call. There is no create_agent and no
-list_agents tool; calling one fails and wastes a turn. The roster holds ONE
-adjuster agent, shared by every adjuster, with no identity of its own — so each
-delegated task MUST open by naming the adjuster it is to act as, full name and
-adjuster_id, before the claim ids and context. The adjuster agent is instructed to
-refuse work that does not say who it is for."""
+capability of this session, not a tool you call.  When you delegate, you MUST open by passing 
+the adjuster id and full name this delegate is acting on behalf of. You tell it who they are.  
+The adjuster agent is instructed to refuse work when they are not told the adjuster_id they are working on behalf of.
+"""
 
 DELEGATION_MECHANICS_SDK = """\
 How delegation actually works here: each adjuster has their own subagent, launched

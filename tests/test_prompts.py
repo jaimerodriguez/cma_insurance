@@ -109,9 +109,12 @@ def test_delegation_mechanics_match_the_backend():
                                        hosted=True)
     sdk = roles.build_system_prompt(Role.AGENT, None, delegate_agents=roster,
                                     hosted=False)
-    assert "no create_agent" in hosted and "shared by every adjuster" in hosted
-    assert "no create_agent" not in sdk
+    # Asserted on intent, not on wording: the phrasing here is prose and gets
+    # edited. What must not change is which backend is told to name the adjuster.
+    assert "adjuster id" in hosted.lower() or "adjuster_id" in hosted
+    assert "MUST" in hosted, "hosted delegation must insist the adjuster is named"
     assert "already knows which adjuster it is" in sdk
+    assert "MUST" not in sdk, "the SDK subagent already has its identity"
 
 
 def test_no_delegation_block_without_a_roster():
